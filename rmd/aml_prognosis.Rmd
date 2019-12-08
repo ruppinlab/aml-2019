@@ -6,18 +6,22 @@ library(biomaRt)
 library(survival)
 library(RegParallel)
 library(survminer)
+library(matrixStats)
+library(ggplot2)
+library(ggrepel)
+require(statar) # for xtile
 ```
 
 Set directories.
 ```{r}
 dir.output <- "~/datasets/SLpediatric/sl_pairs_results/"
-dir.figures <- "~/Google Drive/NIH_NCI/Projects/SL_pediatric/"
+dir.figures <- "~/Google Drive/NIH_NCI/Projects/AML_pediatric/figures/"
 dir.code <- "~/datasets/SLpediatric/R/"
 dir.repo <- "~/src/SLpediatric/R/"
 dir.rdata <- "~/datasets/SLpediatric/Rdata_object/version6_nbl1-3/"
 dir.ppi <- "~/datasets/STRING/"
 dir.depmap <- "~/datasets/DepMap/"
-dir.aml <- "~/datasets/SLpediatric/Rdata_object/version2_CDSI/"
+dir.aml <- "~/datasets/SLpediatric/Rdata_object/version7_aml/"
 dir.target <- "/Users/schischlikf2/datasets/SLpediatric/datasets/TARGET/"
 ```
 
@@ -76,25 +80,16 @@ load(paste(dir.code, "prob.TCGA.extended.qnorm.RData", sep=""));prob0=prob
 rm(prob)
 # load TARGET data
 load(paste(dir.aml, "aml.fpkms.n145.hg38.prob.Rdata", sep="")) # prob_name=aml.fpkms.prob.hg38
-# tissue code information for TARGET data
-#tissue_code <- read.csv(
-#  paste(dir.target, "tissue_code.csv", sep=""), 
-#  colClasses=c("character", "character", "character"))
+
 ```
 
 Preprocess TARGET data.
 ```{r}
-# add tissue information to include in Cox regression
-#df.aml <- data.frame(
-#  sample.names=colnames(aml.fpkms.prob.hg38),
-#  tissue.code=substr(colnames(aml.fpkms.prob.hg38), 18, 19)
-#  )
-#tissue.code.aml <- merge(df.aml, tissue.code, by.x="tissue.code", by.y="Code")
-
 # only select protein coding genes
 aml.fpkms.prob.hg38$ensembl_version <- aml.fpkms.prob.hg38$ensembl
-aml.fpkms.prob.hg38$ensembl <- sapply(aml.fpkms.prob.hg38$ensembl_version, 
-                                      function(x) strsplit(as.character(x), split="\\.")[[1]][1])
+aml.fpkms.prob.hg38$ensembl <- sapply(
+  aml.fpkms.prob.hg38$ensembl_version, 
+  function(x) strsplit(as.character(x), split="\\.")[[1]][1])
 row.names(aml.fpkms.prob.hg38$mRNA) <- aml.fpkms.prob.hg38$ensembl
 
 ensembl <- useMart(
@@ -112,9 +107,13 @@ all_protein_coding <- gene_biotype[gene_biotype$gene_biotype=="protein_coding", 
 ix <- which(aml.fpkms.prob.hg38$ensembl %in% all_protein_coding)
 
 # subset matrix
-pediatric_aml <- subset.genes.prob.target(aml.fpkms.prob.hg38, ix)
+pediatric_aml_intermediate <- subset.genes.prob.target(aml.fpkms.prob.hg38, ix)
 
-# change codex for survival
+# only select genes with a median FPKM >1
+ix <- which(rowMedians(pediatric_aml$mRNA) > 1)
+pediatric_aml <- subset.genes.prob.target(pediatric_aml_intermediate, ix)
+
+# change codex for survival (death=1, alive=0), needed for cox regression
 pediatric_aml$surv.data <-  data.frame(time=pediatric_aml$survival[,1], 
            status=ifelse(pediatric_aml$survival[,2]==0,1,0))
 
@@ -136,17 +135,19 @@ surv_mat <- data.frame(
   age=pediatric_aml$age,
   race=pediatric_aml$race,
   ethnicity=pediatric_aml$ethnicity,
+  tissue=pediatric_aml$tissue,
   time=pediatric_aml$surv.data$time,
   status=pediatric_aml$surv.data$status)
 
 # merge and transform data
-cox_data <- cbind(surv_mat, t(pediatric_aml$mRNA))
-scaled_data <- cbind(surv_mat, scale(t(pediatric_aml$mRNA)))
+# take log2 of FPKM values
+cox_data <- cbind(surv_mat, t(log2(pediatric_aml$mRNA + 1)))
+scaled_data <- cbind(surv_mat, scale(t(log2(pediatric_aml$mRNA + 1 ))))
 
 # Run Cox in parallel
 res <- RegParallel(
   data = cox_data,
-  formula = 'Surv(time, status) ~ [*] + age + strata(sex, race)',
+  formula = 'Surv(time, status) ~ [*] + age + strata(sex, race, ethnicity, tissue)',
   FUN = function(formula, data)
     coxph(formula = formula,
           data = data,
@@ -159,38 +160,91 @@ res <- RegParallel(
   conflevel = 95,
   p.adjust = "BH")
 
-res <- res[!is.na(res$P),]
-res
+# Annotate results
+res_noAge <- res[res$Term!="age", ]
+gene_hgnc<- getBM(
+  attributes = c('ensembl_gene_id', 'hgnc_symbol'), 
+  filters = 'ensembl_gene_id', 
+  values = res_noAge$Variable, 
+  mart = ensembl)
 
+# Merge annotation
+m.res <- merge(res_noAge, gene_hgnc, by.x="Variable", by.y="ensembl_gene_id", all.x = TRUE)
+
+# Plot results
+m.res[order(m.res$P, decreasing=FALSE), ]
+
+# Plot Hazard ratio vs P value
+p <- ggplot(data=m.res, aes(x=log2(HR), y=-log10(P)))
+p <- p + geom_point(fill="blue", colour="white", pch=21, alpha=0.5, size=2.5)
+p <- p + geom_point(data=m.res[m.res$P.adjust < 0.05, ], 
+                    aes(x=log2(HR), y=-log10(P)),
+                    fill="red", colour="white", pch=21, alpha=0.5, size=2.5)
+p <- p + geom_text_repel(data=m.res[m.res$P.adjust < 0.05 & log2(m.res$HR) > 0 , ], 
+                         aes(x=log2(HR), y=-log10(P), label=hgnc_symbol), 
+                         color="red")
+p <- p + geom_text_repel(data=m.res[m.res$P.adjust < 0.05 & log2(m.res$HR) < 0 , ], 
+                         aes(x=log2(HR), y=-log10(P), label=hgnc_symbol), 
+                         color="blue")
+p <- p + coord_fixed(ratio = 1)
+p <- p + theme_bw()
+p <- p + theme(axis.text.x=element_text(colour="black", size=10), 
+               axis.text.y=element_text(colour="black", size=10))
+print(p)
+
+fn <- sprintf(paste(dir.figures, "cox_covar_age.sex.race.ethnicity.pdf", sep=""))
+pdf(fn, height=6, width=6)
+print(p)
+dev.off()
+
+ 
+```
+
+Plot survival (Kaplan Maier plots).
+```{r}
 # try example with one gene
-cox.g1 <- cox_data[, c("samples", "sex", "age", "race", "time", 
-                       "status", "ENSG00000135002")]
-cox_obj <- coxph(Surv(time, status) ~ ENSG00000135002 + age + strata(sex, race), data= cox.g1)
 
-# extract RFS and probe data for downstream analysis
-survplotdata <- scaled_data[,c('time', 'status',
-                               'ENSG00000135002')]
-colnames(survplotdata) <- c('time', 'status', 'RFK')
+km.gene.obj <- function(cox_data, scaled_data=scaled_data, gene=gene, gene_symbol=gene_symbol){
+  cox.g1 <- cox_data[, c("samples", "sex", "age", "race", "tissue", "time", "status", gene)]
 
-# set Z-scale cut-offs for high and low expression
-highExpr <- 1.0
-lowExpr <- -1.0
-survplotdata$RFK<- ifelse(survplotdata$RFK >= highExpr, 'High',
-                          ifelse(survplotdata$RFK <= lowExpr, 'Low', 'Mid'))
+  #survplotdata <- scaled_data[,c('time', 'status', gene)]
+  #colnames(survplotdata) <- c('time', 'status', gene_symbol)
 
-# relevel the factors to have mid as the ref level
-survplotdata$RFK <- factor(survplotdata$RFK,
-                           levels = c('Mid', 'Low', 'High'))
+  # set Z-scale cut-offs for high and low expression
+  #highExpr <- 1.0
+  #lowExpr <- -0.5
+  #survplotdata[[gene_symbol]] <- ifelse(survplotdata[[gene_symbol]] >= highExpr, 'High',
+  #                        ifelse(survplotdata[[gene_symbol]] <= lowExpr, 'Low', 'Mid'))
+  # relevel the factors to have mid as the ref level
+  #survplotdata[[gene_symbol]] <- factor(survplotdata[[gene_symbol]] ,
+  #                         levels = c('Mid', 'Low', 'High'))
+  
+  # different approach
+  cox.g1[[gene_symbol]] <- xtile(cox.g1[[gene]], 3)
 
-ggsurvplot(survfit(Surv(time, status) ~ RFK,
-                   data = survplotdata),
-           data = survplotdata,
-           risk.table = TRUE,
-           pval = TRUE,
-           break.time.by = 500,
-           ggtheme = theme_minimal(),
-           risk.table.y.text.col = TRUE,
-           risk.table.y.text = FALSE)
+  return(cox.g1)
+}
+
+survplotdata <- km.gene.obj(
+  cox_data=cox_data,
+  scaled_data=scaled_data,
+  gene="ENSG00000067048", 
+  gene_symbol = "DDX3Y")
+
+p <- ggsurvplot(
+  survfit(Surv(time, status) ~ DDX3Y, data = survplotdata),
+  data = survplotdata,
+  risk.table = TRUE,
+  pval = FALSE,
+  break.time.by = 500,
+  ggtheme = theme_minimal(),
+  risk.table.y.text.col = TRUE,
+  risk.table.y.text = FALSE)
+
+fn <- sprintf(paste(dir.figures, "kaplan_maier_DDX3Y.pdf", sep=""))
+pdf(fn, height=6, width=6)
+print(p)
+dev.off()
 
 ```
 
@@ -204,78 +258,6 @@ Mine AML (adult & pediatric cell lines).
 Example.
 ```{r}
 # Tutorial from https://www.biostars.org/p/344233/
-#### Read in and prepare data ------------------------------------------------------
-
-library(Biobase)
-library(GEOquery)
-
-# load series and platform data from GEO
-gset <- getGEO('GSE2990', GSEMatrix =TRUE, getGPL=FALSE)
-x <- exprs(gset[[1]])
-
-# remove Affymetrix control probes
-x <- x[-grep('^AFFX', rownames(x)),]
-
-# transform the expression data to Z scores
-x <- t(scale(t(x)))
-
-# extract information of interest from the phenotype data (pdata)
-idx <- which(colnames(pData(gset[[1]])) %in%
-               c('age:ch1', 'distant rfs:ch1', 'er:ch1',
-                 'ggi:ch1', 'grade:ch1', 'node:ch1',
-                 'size:ch1', 'time rfs:ch1'))
-
-metadata <- data.frame(pData(gset[[1]])[,idx],
-                       row.names = rownames(pData(gset[[1]])))
-
-# remove samples from the pdata that have any NA value
-discard <- apply(metadata, 1, function(x) any( is.na(x) ))
-metadata <- metadata[!discard,]
-
-# filter the Z-scores expression data to match the samples in our pdata
-x <- x[,which(colnames(x) %in% rownames(metadata))]
-
-# check that sample names match exactly between pdata and Z-scores 
-all((colnames(x) == rownames(metadata)) == TRUE)
-## [1] TRUE
-
-# create a merged pdata and Z-scores object
-coxdata <- data.frame(metadata, t(x))
-
-# tidy column names
-colnames(coxdata)[1:8] <- c('Age', 'Distant.RFS', 'ER',
-                            'GGI', 'Grade', 'Node',
-                            'Size', 'Time.RFS')
-
-# prepare phenotypes
-coxdata$Distant.RFS <- as.numeric(coxdata$Distant.RFS)
-coxdata$Time.RFS <- as.numeric(gsub('^KJX|^KJ', '', coxdata$Time.RFS))
-coxdata$ER <- factor(coxdata$ER, levels = c(0, 1))
-coxdata$Grade <- factor(coxdata$Grade, levels = c(1, 2, 3))
-
-
-##### Test each gene independently via Cox regression --------------------------
-
-library(survival)
-library(RegParallel)
-
-res <- RegParallel(
-  data = coxdata,
-  formula = 'Surv(Time.RFS, Distant.RFS) ~ [*]',
-  FUN = function(formula, data)
-    coxph(formula = formula,
-          data = data,
-          ties = 'breslow',
-          singular.ok = TRUE),
-  FUNtype = 'coxph',
-  variables = colnames(coxdata)[9:ncol(coxdata)],
-  blocksize = 2000,
-  cores = 2,
-  nestedParallel = FALSE,
-  conflevel = 95)
-res <- res[!is.na(res$P),]
-res
-
 
 ```
 
