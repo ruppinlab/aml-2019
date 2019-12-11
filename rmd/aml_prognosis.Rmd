@@ -1,4 +1,11 @@
-# 
+---
+title: "List of prognostic genes from TCGA/TARGET."
+author: Fiorella Schischlik
+date: December 9, 2019
+output:
+  md_document:
+    variant: gfm
+---
 
 Load libraries.
 ```{r}
@@ -25,27 +32,51 @@ dir.aml <- "~/datasets/SLpediatric/Rdata_object/version7_aml/"
 dir.target <- "/Users/schischlikf2/datasets/SLpediatric/datasets/TARGET/"
 ```
 
-Recurrent used functions.
+Functions for subsetting prob Rdata objects.
 ```{r}
 
 subset.prob.tcga <- function(prob, ix){
   
-  prob$samples=prob$samples[ix]
-  prob$types=prob$types[ix]
-  prob$mRNA=prob$mRNA[,ix]
-  prob$scna=prob$scna[,ix]
-  prob$mRNAq=prob$mRNAq[,ix]
-  prob$scnaq=prob$scnaq[,ix]
-  prob$mRNAq2=prob$mRNAq2[,ix]
-  prob$scnaq2=prob$scnaq2[,ix]
-  prob$sex=prob$sex[ix]
-  prob$age=prob$age[ix]
-  prob$race=prob$race[ix]
-  prob$survival=prob$survival[ix,]
-  prob$stage=prob$stage[ix]
-  prob$mRNA.norm=prob$mRNA.norm[,ix]
-  prob$scna.norm=prob$scna.norm[,ix]
-  prob$surv.dt=prob$surv.dt[ix,]
+  prob$samples <- prob$samples[ix]
+  prob$types <- prob$types[ix]
+  prob$mRNA <- prob$mRNA[,ix]
+  prob$scna <- prob$scna[,ix]
+  prob$mRNAq <- prob$mRNAq[,ix]
+  prob$scnaq <- prob$scnaq[,ix]
+  prob$mRNAq2 <- prob$mRNAq2[,ix]
+  prob$scnaq2 <- prob$scnaq2[,ix]
+  prob$sex <- prob$sex[ix]
+  prob$age <- prob$age[ix]
+  prob$race <- prob$race[ix]
+  prob$survival <- prob$survival[ix,]
+  prob$stage <- prob$stage[ix]
+  prob$mRNA.norm <- prob$mRNA.norm[,ix]
+  prob$scna.norm <- prob$scna.norm[,ix]
+  prob$surv.dt <- prob$surv.dt[ix,]
+  
+  return(prob)
+}
+
+subset.genes.prob.tcga <- function(prob, ix){
+  
+  prob$genes <- prob$genes[ix]
+  prob$entrez <- prob$entrez[ix]
+  prob$samples <- prob$samples
+  prob$types <- prob$types
+  prob$mRNA <- prob$mRNA[ix, ]
+  prob$scna <- prob$scna[ix, ]
+  prob$mRNAq <- prob$mRNAq[ix, ]
+  prob$scnaq <- prob$scnaq[ix, ]
+  prob$mRNAq2 <- prob$mRNAq2[ix, ]
+  prob$scnaq2 <- prob$scnaq2[ix, ]
+  prob$sex <- prob$sex
+  prob$age <- prob$age
+  prob$race <- prob$race
+  prob$survival <- prob$survival
+  prob$stage <- prob$stage
+  prob$mRNA.norm <- prob$mRNA.norm[ix, ]
+  prob$scna.norm <- prob$scna.norm[ix, ]
+  prob$surv.dt <- prob$surv.dt
   
   return(prob)
 }
@@ -71,6 +102,24 @@ subset.genes.prob.target <- function(prob, ix){
 
 ```
 
+Cox function.
+```{r}
+cox.gene.expression <- function(gene, surv_mat=surv_mat){
+  
+  cox_uncntrl <- coxph(Surv(time, status) ~ gene, data=surv_mat)
+  summary_uncntrl  <- summary(cox_uncntrl)
+    
+  cox_cntrl <- coxph(Surv(time, status) ~ gene + age + strata(sex, race), data=surv_mat)
+  summary_cntrl  <- summary(cox_cntrl)
+    
+  res <- c(summary_uncntrl$coefficients["gene", 1:5], summary_cntrl$coefficients["gene", 1:5])
+  
+  return(res)
+}
+
+```
+
+
 Load data.
 ```{r}
 # load depmap data
@@ -80,6 +129,43 @@ load(paste(dir.code, "prob.TCGA.extended.qnorm.RData", sep=""));prob0=prob
 rm(prob)
 # load TARGET data
 load(paste(dir.aml, "aml.fpkms.n145.hg38.prob.Rdata", sep="")) # prob_name=aml.fpkms.prob.hg38
+
+```
+
+Preprocess TCGA data.
+```{r}
+# select LAML only
+ix <- which(prob0$types=="LAML")
+prob_adult_aml <- subset.prob.tcga(prob0, ix)
+
+# free up some memory
+rm(prob0)
+
+# select only protein coding genes
+ensembl <- useMart(
+  "ensembl", 
+  dataset="hsapiens_gene_ensembl")
+
+gene_biotype <- getBM(
+  attributes = c('hgnc_symbol', 'gene_biotype'), 
+  filters = 'hgnc_symbol', 
+  values = prob_adult_aml$genes, 
+  mart = ensembl)
+
+# index of all protein coding genes
+all_protein_coding <- gene_biotype[gene_biotype$gene_biotype=="protein_coding", ]$hgnc_symbol
+ix <- which(prob_adult_aml$genes %in% all_protein_coding)
+
+# subset matrix
+aml_intermediate <- subset.genes.prob.tcga(prob_adult_aml, ix)
+
+# only select genes with a median FPKM >1
+ix <- which(rowMedians(aml_intermediate$mRNA) > 10)
+aml_tcga <- subset.genes.prob.tcga(aml_intermediate, ix)
+
+# assign column and rownames to mRNA
+colnames(aml_tcga$mRNA) <- aml_tcga$samples
+row.names(aml_tcga$mRNA) <- aml_tcga$genes
 
 ```
 
@@ -110,7 +196,7 @@ ix <- which(aml.fpkms.prob.hg38$ensembl %in% all_protein_coding)
 pediatric_aml_intermediate <- subset.genes.prob.target(aml.fpkms.prob.hg38, ix)
 
 # only select genes with a median FPKM >1
-ix <- which(rowMedians(pediatric_aml$mRNA) > 1)
+ix <- which(rowMedians(pediatric_aml_intermediate$mRNA) > 1)
 pediatric_aml <- subset.genes.prob.target(pediatric_aml_intermediate, ix)
 
 # change codex for survival (death=1, alive=0), needed for cox regression
@@ -119,15 +205,84 @@ pediatric_aml$surv.data <-  data.frame(time=pediatric_aml$survival[,1],
 
 ```
 
-
 Prognostic genes from TCGA/TARGET.
 ```{r}
 #### TCGA ----------------------------------------------------------------------
-# select LAML only
-ix <- which(prob0$types=="LAML")
-prob.adult.aml <- subset.prob(prob0,ix)
 
-### TARGET ---------------------------------------------------------------------
+# create dataframe
+surv_mat <- data.frame(
+  samples=aml_tcga$samples,
+  sex=aml_tcga$sex,
+  age=aml_tcga$age,
+  race=aml_tcga$race,
+  stage=aml_tcga$stage,
+  time=aml_tcga$surv.dt$time,
+  status=aml_tcga$surv.dt$status)
+
+# merge and transform data
+# take log2 of FPKM values
+cox_data <- cbind(surv_mat, t(log2(aml_tcga$mRNA + 1)))
+scaled_data <- cbind(surv_mat, scale(t(log2(aml_tcga$mRNA + 1))))
+
+# Run Cox Surv(time, status) ~ [*] + age + strata(sex, race)
+cox_mrna <- t(apply(t(log2(aml_tcga$mRNA + 1)), 2, function(gene) cox.gene.expression(gene, surv_mat)))
+colnames(cox_mrna) <- c("uncntrl_coef", "uncntrl_HR", "uncntrl_se_coeff", "uncntrl_z", "uncntrl_P",
+                        "cntrl_coef", "cntrl_HR", "cntrl_se_coeff", "cntrl_z", "cntrl_P")
+
+cox_mrna <- as.data.frame(cox_mrna)
+cox_mrna$cntrl_padjust <- p.adjust(cox_mrna$cntrl_P, method="BH")
+cox_mrna$uncntrl_padjust <- p.adjust(cox_mrna$uncntrl_P, method="BH")
+cox_mrna$hgnc_symbol <- row.names(cox_mrna)
+
+# Plot Hazard ratio vs P value
+p <- ggplot(data=cox_mrna, aes(x=log2(cntrl_HR), y=-log10(cntrl_P)))
+p <- p + geom_point(fill="blue", colour="white", pch=21, alpha=0.5, size=2.5)
+p <- p + geom_point(data=cox_mrna[cox_mrna$cntrl_padjust < 0.05, ], 
+                    aes(x=log2(cntrl_HR), y=-log10(cntrl_P)),
+                    fill="red", colour="white", pch=21, alpha=0.5, size=2.5)
+p <- p + geom_text_repel(data=cox_mrna[cox_mrna$cntrl_padjust < 0.05 & log2(cox_mrna$cntrl_HR) > 0 , ], 
+                         aes(x=log2(cntrl_HR), y=-log10(cntrl_P), label=hgnc_symbol), 
+                         color="red")
+p <- p + geom_text_repel(data=cox_mrna[cox_mrna$cntrl_padjust < 0.05 & log2(cox_mrna$cntrl_HR) < 0 , ], 
+                         aes(x=log2(cntrl_HR), y=-log10(cntrl_P), label=hgnc_symbol), 
+                         color="blue")
+p <- p + coord_fixed(ratio = 1)
+p <- p + theme_bw()
+p <- p + theme(axis.text.x=element_text(colour="black", size=10), 
+               axis.text.y=element_text(colour="black", size=10))
+print(p)
+
+fn <- sprintf(paste(dir.figures, "cox_tcga_cntrl_fdr0p5.pdf", sep=""))
+pdf(fn, height=6, width=6)
+print(p)
+dev.off()
+
+# Plot Hazard ratio vs P value 
+# for uncntrl
+p <- ggplot(data=cox_mrna, aes(x=log2(uncntrl_HR), y=-log10(uncntrl_P)))
+p <- p + geom_point(fill="blue", colour="white", pch=21, alpha=0.5, size=2.5)
+p <- p + geom_point(data=cox_mrna[cox_mrna$uncntrl_padjust < 0.01, ], 
+                    aes(x=log2(uncntrl_HR), y=-log10(uncntrl_P)),
+                    fill="red", colour="white", pch=21, alpha=0.5, size=2.5)
+p <- p + geom_text_repel(data=cox_mrna[cox_mrna$uncntrl_padjust < 0.01 & log2(cox_mrna$uncntrl_HR) > 0 , ], 
+                         aes(x=log2(uncntrl_HR), y=-log10(uncntrl_P), label=hgnc_symbol), 
+                         color="red")
+p <- p + geom_text_repel(data=cox_mrna[cox_mrna$uncntrl_padjust < 0.01 & log2(cox_mrna$uncntrl_HR) < 0 , ], 
+                         aes(x=log2(uncntrl_HR), y=-log10(uncntrl_P), label=hgnc_symbol), 
+                         color="blue")
+p <- p + coord_fixed(ratio = 1)
+p <- p + theme_bw()
+p <- p + theme(axis.text.x=element_text(colour="black", size=10), 
+               axis.text.y=element_text(colour="black", size=10))
+print(p)
+
+fn <- sprintf(paste(dir.figures, "cox_tcga_uncntrl_fdr0p1.pdf", sep=""))
+pdf(fn, height=8, width=8)
+print(p)
+dev.off()
+
+
+#### TARGET --------------------------------------------------------------------
 
 surv_mat <- data.frame(
   samples=pediatric_aml$samples,
