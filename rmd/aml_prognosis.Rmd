@@ -405,7 +405,60 @@ dev.off()
 
 Mine AML (adult & pediatric cell lines).
 ```{r}
-# Mine adult and pediatric cell line separtely. 
+# Validate prognostic genes with stat. significance in AML cell lines
+# For TCGA select all 
+
+# select only genes with p.adjust (wald.test) < 0.05
+sig_genes_bad <- cox_mrna[cox_mrna$cntrl_padjust < 0.05 & cox_mrna$cntrl_HR > 1, ]
+sig_genes_good <- cox_mrna[cox_mrna$cntrl_padjust < 0.05 & cox_mrna$cntrl_HR < 1, ]
+
+# Essentiality imputation
+for (i in seq(nrow(depmap_19Q3$avana))){
+  median.na <- median(depmap_19Q3$avana[i,], na.rm=TRUE)
+  if (is.na(median.na)) { median.na <- 0 }
+  depmap_19Q3$avana[i, is.na(depmap_19Q3$avana[i,])] <- median.na
+}
+
+# selct adult AML cell lines
+# had to take out age ....& depmap_19Q3$meta$age > 18
+aml_df <- depmap_19Q3$meta[depmap_19Q3$meta$lineage_subtype=="AML" & depmap_19Q3$meta$age < 25, ]
+aml_adult <- row.names(aml_df[complete.cases(aml_df$age), ])
+isel <- which(colnames(depmap_19Q3$avana) %in% aml_adult)
+ava_id <- colnames(depmap_19Q3$avana[, isel])
+mrna_isel <- depmap_19Q3$expression[, ava_id]
+
+# set alpha
+alpha=1/3
+
+mrna1 <- mrna_isel > apply(mrna_isel, 1, quantile, probs = alpha,  na.rm = TRUE)
+mrna2 <- mrna_isel > apply(mrna_isel, 1, quantile, probs = 1-alpha,  na.rm = TRUE)
+depmap_19Q3$exprq <- mrna1 + mrna2
+
+# select genes of interest
+igsel <- depmap_19Q3$exprq[row.names(sig_genes_bad), ]
+igsel <- depmap_19Q3$exprq[row.names(sig_genes_good), ]
+    
+# divide in low and high, perform wilcoxon
+stat <- NULL
+i <- 1
+for (gene in row.names(sig_genes_good)){
+  
+  print(gene)
+  ihi <- names(which((igsel[gene, ] == 2)))
+  ilo <- names(which((igsel[gene, ] == 0)))
+      
+  if (length(ihi) > 1 & length(ilo) > 1 ){
+      stat[i] <- wilcox.test(depmap_19Q3$avana[gene, ilo],
+                              depmap_19Q3$avana[gene, ihi], 
+                             alternative="greater")$p.value
+  }
+  
+  i <- i + 1
+}
+
+df <- data.frame(gene=row.names(sig_genes_good), stat_wilcox=stat)
+
+      
 
 
 ```
