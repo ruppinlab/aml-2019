@@ -7,6 +7,9 @@ output:
     variant: gfm
 ---
 
+Resources
+# https://www.biostars.org/p/153013/
+
 Load libraries.
 ```{r}
 library(biomaRt)
@@ -17,6 +20,7 @@ library(matrixStats)
 library(ggplot2)
 library(ggrepel)
 require(statar) # for xtile
+library(GEOquery)
 ```
 
 Set directories.
@@ -29,7 +33,8 @@ dir.rdata <- "~/datasets/SLpediatric/Rdata_object/version6_nbl1-3/"
 dir.ppi <- "~/datasets/STRING/"
 dir.depmap <- "~/datasets/DepMap/"
 dir.aml <- "~/datasets/SLpediatric/Rdata_object/version7_aml/"
-dir.target <- "/Users/schischlikf2/datasets/SLpediatric/datasets/TARGET/"
+dir.target <- "~/datasets/SLpediatric/datasets/TARGET/"
+dir.beat <- "~/datasets/AML/Tyner_etal_BEATstudy/"
 ```
 
 Functions for subsetting prob Rdata objects.
@@ -119,7 +124,6 @@ cox.gene.expression <- function(gene, surv_mat=surv_mat){
 
 ```
 
-
 Load data.
 ```{r}
 # load depmap data
@@ -129,6 +133,42 @@ load(paste(dir.code, "prob.TCGA.extended.qnorm.RData", sep=""));prob0=prob
 rm(prob)
 # load TARGET data
 load(paste(dir.aml, "aml.fpkms.n145.hg38.prob.Rdata", sep="")) # prob_name=aml.fpkms.prob.hg38
+# read in data from BEAT study
+#rna.beat.cpm <- read.csv(paste(dir.beat, "Gene_counts_CPM.csv", sep=""), header=TRUE, sep=",", stringsAsFactors = FALSE)
+rna.beat.fpkm <- read.csv(paste(dir.beat, "Gene_counts_RPKM.csv", sep=""), header=TRUE, sep=",", stringsAsFactors = FALSE)
+rna.beat.clinical <- read.csv(paste(dir.beat, "Clinical_Summary.csv", sep=""), header=TRUE, sep=",", stringsAsFactors = FALSE)
+
+```
+
+Create Rdata object for BEAT AML study.
+```{r}
+# Convert RPKM/FPKM to TPM
+# Implementation was taken from https://haroldpimentel.wordpress.com/2014/05/08/what-the-fpkm-a-review-rna-seq-expression-units/
+fpkmToTpm <- function(fpkm){
+  return(exp(log(fpkm) - log(sum(fpkm)) + log(1e6)))
+}
+
+# Convert log(RPKM) to RPKM
+rna.beat <- exp(as.matrix(rna.beat.fpkm[, 3:dim(rna.beat.fpkm)[2]]))
+
+# Convert RPKM to TPM
+rna.tpm <- apply(rna.beat, 2, function(x) fpkmToTpm(x))
+
+# Issue
+# Readin through the methods section of the BEAT study, RPKM values were calculated as proposed by
+# Hansen, K. D., Irizarry, R. A. & Wu, Z. Removing technical variability in RNA-seq data using 
+# conditional quantile normalization. Biostatistics 13, 204–216 (2012).
+# Tyner et al., "Normalization was performed using the conditional quantile normalization procedure64, which produced GC-content-corrected log2 reads per kilobase per million mapped reads (RPKM) values. This procedure produces both offsets to be used in conjunction with edgeR as well as a matrix of log2-normalized RPKM values for clustering"
+
+
+
+
+```
+
+Extract AML dataset from GEO (GSE67040).
+```{r}
+# Requested survival data.
+aml.rna.geoquery <- getGEO("GSE67040")
 
 ```
 
@@ -407,6 +447,8 @@ Mine AML (adult & pediatric cell lines).
 ```{r}
 # Validate prognostic genes with stat. significance in AML cell lines
 # For TCGA select all 
+# Q: Is the essentiality reduced in those cell lines with initial high expresssion of
+# gene X and subsequent knock-down of gene X
 
 # select only genes with p.adjust (wald.test) < 0.05
 sig_genes_bad <- cox_mrna[cox_mrna$cntrl_padjust < 0.05 & cox_mrna$cntrl_HR > 1, ]
@@ -421,7 +463,7 @@ for (i in seq(nrow(depmap_19Q3$avana))){
 
 # selct adult AML cell lines
 # had to take out age ....& depmap_19Q3$meta$age > 18
-aml_df <- depmap_19Q3$meta[depmap_19Q3$meta$lineage_subtype=="AML" & depmap_19Q3$meta$age < 25, ]
+aml_df <- depmap_19Q3$meta[depmap_19Q3$meta$lineage_subtype=="AML" & depmap_19Q3$meta$age >18, ]
 aml_adult <- row.names(aml_df[complete.cases(aml_df$age), ])
 isel <- which(colnames(depmap_19Q3$avana) %in% aml_adult)
 ava_id <- colnames(depmap_19Q3$avana[, isel])
@@ -448,8 +490,8 @@ for (gene in row.names(sig_genes_good)){
   ilo <- names(which((igsel[gene, ] == 0)))
       
   if (length(ihi) > 1 & length(ilo) > 1 ){
-      stat[i] <- wilcox.test(depmap_19Q3$avana[gene, ilo],
-                              depmap_19Q3$avana[gene, ihi], 
+      stat[i] <- wilcox.test(depmap_19Q3$avana[gene, ihi],
+                              depmap_19Q3$avana[gene, ilo], 
                              alternative="greater")$p.value
   }
   
