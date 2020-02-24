@@ -21,6 +21,7 @@ library(ggplot2)
 library(ggrepel)
 require(statar) # for xtile
 library(GEOquery)
+library(matrixStats)
 ```
 
 Set directories.
@@ -135,7 +136,7 @@ rm(prob)
 load(paste(dir.aml, "aml.fpkms.n145.hg38.prob.Rdata", sep="")) # prob_name=aml.fpkms.prob.hg38
 # read in data from BEAT study
 #rna.beat.cpm <- read.csv(paste(dir.beat, "Gene_counts_CPM.csv", sep=""), header=TRUE, sep=",", stringsAsFactors = FALSE)
-rna.beat.fpkm <- read.csv(paste(dir.beat, "Gene_counts_RPKM.csv", sep=""), header=TRUE, sep=",", stringsAsFactors = FALSE)
+rna.beat.rpkm <- read.csv(paste(dir.beat, "Gene_counts_RPKM.csv", sep=""), header=TRUE, sep=",", stringsAsFactors = FALSE)
 rna.beat.clinical <- read.csv(paste(dir.beat, "Clinical_Summary.csv", sep=""), header=TRUE, sep=",", stringsAsFactors = FALSE)
 
 ```
@@ -149,7 +150,7 @@ fpkmToTpm <- function(fpkm){
 }
 
 # Convert log(RPKM) to RPKM
-rna.beat <- exp(as.matrix(rna.beat.fpkm[, 3:dim(rna.beat.fpkm)[2]]))
+rna.beat <- exp(as.matrix(rna.beat.fpkm[, 3:dim(rna.beat.rpkm)[2]]))
 
 # Convert RPKM to TPM
 rna.tpm <- apply(rna.beat, 2, function(x) fpkmToTpm(x))
@@ -158,10 +159,75 @@ rna.tpm <- apply(rna.beat, 2, function(x) fpkmToTpm(x))
 # Readin through the methods section of the BEAT study, RPKM values were calculated as proposed by
 # Hansen, K. D., Irizarry, R. A. & Wu, Z. Removing technical variability in RNA-seq data using 
 # conditional quantile normalization. Biostatistics 13, 204–216 (2012).
-# Tyner et al., "Normalization was performed using the conditional quantile normalization procedure64, which produced GC-content-corrected log2 reads per kilobase per million mapped reads (RPKM) values. This procedure produces both offsets to be used in conjunction with edgeR as well as a matrix of log2-normalized RPKM values for clustering"
+# Tyner et al., "Normalization was performed using the conditional quantile normalization procedure (64), which produced GC-content-corrected log2 reads per kilobase per million mapped reads (RPKM) values. This procedure produces both offsets to be used in conjunction with edgeR as well as a matrix of log2-normalized RPKM values for clustering"
 
+# rename column names in AML cohort
+colnames(rna.beat.rpkm) <- gsub("\\.", "-", gsub("X", "AML-", colnames(rna.beat.rpkm)))
 
+# change LabId name to match AML cohort
+rna.beat.clinical$LabId_match_with_rpkm_matrix <- paste("AML-", rna.beat.clinical$LabId, sep="")
 
+# only keep Labids that match with AML cohort
+rna.beat.clinical.sel1 <- rna.beat.clinical[rna.beat.clinical$LabId_match_with_rpkm_matrix %in% colnames(rna.beat.rpkm), ]
+
+# select cases with the following specimenGroup
+sel.specimenGroups <- c("Initial Acute Leukemia Diagnosis", 
+                       "Post-Chemotherapy", "Post-Chemotherapy|Relapse",
+                       "Post-Chemotherapy|Residual Disease", "Residual Disease",
+                       "Residual Disease|Post-Chemotherapy")
+rna.beat.clinical.sel2 <- rna.beat.clinical.sel1[rna.beat.clinical.sel1$specimenGroups %in%
+                                                   sel.specimenGroups, ]
+
+```
+
+Plot PCA
+```{r}
+
+mat2pca <- function(pca.matrix){
+  # pca.matrix <- prob.nbl$mRNA
+  pca.matrix <- as.matrix(pca.matrix)
+  pca.compl.cases <- pca.matrix[complete.cases(pca.matrix), ]
+  pca.compl.cases <- cbind(pca.compl.cases, rowMedians=rowMedians(pca.compl.cases))
+  quantiles.pca <- quantile(pca.compl.cases[, "rowMedians"])
+  pca.compl.cases <- as.data.frame(pca.compl.cases)
+  pca.rm.low.expr <- pca.compl.cases[pca.compl.cases$rowMedians > quantiles.pca[2], ]
+  pca.rm.low.expr.sel <- pca.rm.low.expr[, 1:(dim(pca.rm.low.expr)[2]-1)]
+  pca.res <- prcomp(pca.rm.low.expr.sel)
+  pcas <- pca.res$rotation
+  plot.pca <- data.frame(PC1=pcas[,c("PC1")], PC2=pcas[,c("PC2")])
+  return(pcas)
+}
+
+#plot.pca <- function(plot.fig.pca, VAR="isRelapse"){
+#  g <- ggplot(data=plot.fig.pca, aes(x=PC1, y=PC2, colour=specimenGroups))
+#  g <- g + geom_point(size=2)
+#  #g <- g + ggtitle(title)
+#  g <- g + theme_bw()
+#  plot(g)
+#  return(g)
+#} 
+
+# preprocess matrix
+# subselect rpkm matrix
+rna.beat.rpkm.sel <- rna.beat.rpkm[, rna.beat.clinical.sel2$LabId_match_with_rpkm_matrix]
+pcas <- mat2pca(rna.beat.rpkm.sel) # add variable to plot
+pcas <- as.data.frame(pcas)
+pcas$LabId_match_with_rpkm_matrix <- rownames(pcas)
+m.pcas <- merge(pcas[, c("PC1", "PC2", "LabId_match_with_rpkm_matrix")], rna.beat.clinical.sel2, by="LabId_match_with_rpkm_matrix")
+m.pcas$X..Blasts.in.BM <- as.numeric(m.pcas$X..Blasts.in.BM)
+m.pcas$X..Blasts.in.PB <- as.numeric(m.pcas$X..Blasts.in.PB)
+m.pcas$Platelet.Count <- as.numeric(m.pcas$Platelet.Count)
+m.pcas$WBC.Count<- as.numeric(m.pcas$WBC.Count)
+m.pcas$X..Immature.Granulocytes.in.PB <- as.numeric(m.pcas$X..Immature.Granulocytes.in.PB)
+
+# plots
+# specimenGroups, X..Blasts.in.BM --> these variables show distinct clustering or gradient
+g <- ggplot(data=m.pcas, 
+            aes(x=PC1, y=PC2, colour=X..Blasts.in.BM))
+g <- g + geom_point(size=2, alpha=0.7)
+g <- g + scale_color_gradient(low="blue", high="red")
+g <- g + theme_bw()
+plot(g)
 
 ```
 
