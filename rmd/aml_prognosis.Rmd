@@ -1,5 +1,5 @@
 ---
-title: "List of prognostic genes from TCGA/TARGET."
+title: "List of prognostic genes from TCGA, TARGET, BEAT AML study."
 author: Fiorella Schischlik
 date: December 9, 2019
 output:
@@ -7,11 +7,17 @@ output:
     variant: gfm
 ---
 
+Resources and other issues
+```{r}
 Resources
 # https://www.biostars.org/p/153013/
+Issues
+# Should I standardize age before cox ?
+```
 
 Load libraries.
 ```{r}
+
 library(biomaRt)
 library(survival)
 library(RegParallel)
@@ -22,10 +28,14 @@ library(ggrepel)
 require(statar) # for xtile
 library(GEOquery)
 library(matrixStats)
+library(data.table)
+library(reshape2)
+
 ```
 
 Set directories.
 ```{r}
+
 dir.output <- "~/datasets/SLpediatric/sl_pairs_results/"
 dir.figures <- "~/Google Drive/NIH_NCI/Projects/AML_pediatric/figures/"
 dir.code <- "~/datasets/SLpediatric/R/"
@@ -36,13 +46,13 @@ dir.depmap <- "~/datasets/DepMap/"
 dir.aml <- "~/datasets/SLpediatric/Rdata_object/version7_aml/"
 dir.target <- "~/datasets/SLpediatric/datasets/TARGET/"
 dir.beat <- "~/datasets/AML/Tyner_etal_BEATstudy/"
+dir.save <- "~/datasets/AML/result_tables/"
+
 ```
 
 Functions for subsetting prob Rdata objects.
 ```{r}
-
 subset.prob.tcga <- function(prob, ix){
-  
   prob$samples <- prob$samples[ix]
   prob$types <- prob$types[ix]
   prob$mRNA <- prob$mRNA[,ix]
@@ -59,12 +69,11 @@ subset.prob.tcga <- function(prob, ix){
   prob$mRNA.norm <- prob$mRNA.norm[,ix]
   prob$scna.norm <- prob$scna.norm[,ix]
   prob$surv.dt <- prob$surv.dt[ix,]
-  
+  prob$mrna.tpm <- prob$mrna.tpm[,ix]
   return(prob)
 }
 
 subset.genes.prob.tcga <- function(prob, ix){
-  
   prob$genes <- prob$genes[ix]
   prob$entrez <- prob$entrez[ix]
   prob$samples <- prob$samples
@@ -83,7 +92,7 @@ subset.genes.prob.tcga <- function(prob, ix){
   prob$mRNA.norm <- prob$mRNA.norm[ix, ]
   prob$scna.norm <- prob$scna.norm[ix, ]
   prob$surv.dt <- prob$surv.dt
-  
+  prob$mrna.tpm <- prob$mrna.tpm[ix, ]
   return(prob)
 }
 
@@ -93,6 +102,7 @@ subset.genes.prob.target <- function(prob, ix){
   prob$ensembl_version <- prob$ensembl_version[ix]
   prob$scna <- prob$scna[ix, ]
   prob$mRNA <- prob$mRNA[ix, ]
+  prob$mrna.tpm <- prob$mrna.tpm[ix,]
   prob$samples <- prob$samples
   prob$types <- prob$types
   prob$mutations <- prob$mutations
@@ -102,10 +112,33 @@ subset.genes.prob.target <- function(prob, ix){
   prob$ethnicity <- prob$ethnicity
   prob$survival <- prob$survival
   prob$eventfree <- prob$eventfree
-  
   return(prob) 
 }
 
+subset.genes.prob.beat <- function(prob, ix){
+  prob$genes <- prob$genes[ix]
+  prob$samples <- prob$samples
+  prob$types <- prob$types
+  prob$mrna.tpm <- prob$mrna.tpm[ix, ]
+  prob$mrna.rpkm <- prob$mrna.rpkm[ix, ]
+  prob$sex <- prob$sex
+  prob$age <- prob$age
+  prob$ethnicity <- prob$ethnicity
+  prob$tissue <- prob$tissue
+  prob$blastsinBM <- prob$blastsinBM
+  prob$survival <- prob$survival
+  prob$surv.data <- prob$surv.dat
+  return(prob) 
+}
+
+```
+
+Convert RPKM/FPKM to TPM
+```{r}
+# Implementation was taken from https://haroldpimentel.wordpress.com/2014/05/08/what-the-fpkm-a-review-rna-seq-expression-units/
+fpkmToTpm <- function(fpkm){
+  return(exp(log(fpkm) - log(sum(fpkm)) + log(1e6)))
+}
 ```
 
 Cox function.
@@ -123,10 +156,43 @@ cox.gene.expression <- function(gene, surv_mat=surv_mat){
   return(res)
 }
 
+cox.gene.expression.target <- function(gene, surv_mat=surv_mat){
+  
+  cox_uncntrl <- coxph(Surv(time, status) ~ gene, data=surv_mat)
+  summary_uncntrl  <- summary(cox_uncntrl)
+    
+  cox_cntrl <- coxph(Surv(time, status) ~ gene + age + strata(sex, race, ethnicity, tissue), data=surv_mat)
+  summary_cntrl  <- summary(cox_cntrl)
+    
+  res <- c(summary_uncntrl$coefficients["gene", 1:5], summary_cntrl$coefficients["gene", 1:5])
+  
+  return(res)
+}
+
+cox.gene.expression.beat <- function(gene, surv_mat=surv_mat){
+  
+  cox_uncntrl <- coxph(Surv(time, status) ~ gene, data=surv_mat)
+  summary_uncntrl  <- summary(cox_uncntrl)
+    
+  cox_cntrl <- coxph(Surv(time, status) ~ gene + age + blastsinBM + strata(sex, ethnicity), data=surv_mat)
+  summary_cntrl  <- summary(cox_cntrl)
+  
+  cox_cntrl_noblasts <- coxph(Surv(time, status) ~ gene + age + strata(sex, ethnicity), data=surv_mat)
+  summary_cntrl_noblasts <- summary(cox_cntrl_noblasts)
+    
+  res <- c(summary_uncntrl$coefficients["gene", 1:5],
+           summary_cntrl_noblasts$coefficients["gene", 1:5],
+           summary_cntrl$coefficients["gene", 1:5]
+           )
+  
+  return(res)
+}
+
 ```
 
 Load data.
 ```{r}
+
 # load depmap data
 load(paste(dir.depmap, "depmap_19Q3.RData", sep=""))
 # load TCGA data
@@ -138,20 +204,20 @@ load(paste(dir.aml, "aml.fpkms.n145.hg38.prob.Rdata", sep="")) # prob_name=aml.f
 #rna.beat.cpm <- read.csv(paste(dir.beat, "Gene_counts_CPM.csv", sep=""), header=TRUE, sep=",", stringsAsFactors = FALSE)
 rna.beat.rpkm <- read.csv(paste(dir.beat, "Gene_counts_RPKM.csv", sep=""), header=TRUE, sep=",", stringsAsFactors = FALSE)
 rna.beat.clinical <- read.csv(paste(dir.beat, "Clinical_Summary.csv", sep=""), header=TRUE, sep=",", stringsAsFactors = FALSE)
+# load BEAT AML - TPM normalized
+load(file=paste(dir.beat, "prob_aml_beat.RData", sep=""))
+# Load drug data
+load(paste(dir.code, "prob.CTRP.RData", sep=""));prob.ctrp=prob # prob.ctrp
+# dont use it's faulty
+#load(paste(dir.code, "prob.CTRP.v2.extended.RData", sep=""));prob.ctrp=prob # prob.ctrp
+load(paste(dir.code, "prob.gdsc.new.extended.RData", sep=""))# prob.gdsc
 
 ```
 
 Create Rdata object for BEAT AML study.
 ```{r}
-# Convert RPKM/FPKM to TPM
-# Implementation was taken from https://haroldpimentel.wordpress.com/2014/05/08/what-the-fpkm-a-review-rna-seq-expression-units/
-fpkmToTpm <- function(fpkm){
-  return(exp(log(fpkm) - log(sum(fpkm)) + log(1e6)))
-}
-
 # Convert log(RPKM) to RPKM
-rna.beat <- exp(as.matrix(rna.beat.fpkm[, 3:dim(rna.beat.rpkm)[2]]))
-
+rna.beat <- exp(as.matrix(rna.beat.rpkm[, 3:dim(rna.beat.rpkm)[2]]))
 # Convert RPKM to TPM
 rna.tpm <- apply(rna.beat, 2, function(x) fpkmToTpm(x))
 
@@ -159,15 +225,23 @@ rna.tpm <- apply(rna.beat, 2, function(x) fpkmToTpm(x))
 # Readin through the methods section of the BEAT study, RPKM values were calculated as proposed by
 # Hansen, K. D., Irizarry, R. A. & Wu, Z. Removing technical variability in RNA-seq data using 
 # conditional quantile normalization. Biostatistics 13, 204–216 (2012).
-# Tyner et al., "Normalization was performed using the conditional quantile normalization procedure (64), which produced GC-content-corrected log2 reads per kilobase per million mapped reads (RPKM) values. This procedure produces both offsets to be used in conjunction with edgeR as well as a matrix of log2-normalized RPKM values for clustering"
+# Tyner et al., "Normalization was performed using the conditional quantile normalization 
+# procedure (64), which produced GC-content-corrected log2 reads per kilobase per million 
+# mapped reads (RPKM) values. This procedure produces both offsets to be used in conjunction 
+# with edgeR as well as a matrix of log2-normalized RPKM values for clustering"
 
 # rename column names in AML cohort
+colnames(rna.tpm) <- gsub("\\.", "-", gsub("X", "AML-", colnames(rna.tpm)))
 colnames(rna.beat.rpkm) <- gsub("\\.", "-", gsub("X", "AML-", colnames(rna.beat.rpkm)))
+# rename row names in AML cohort
+row.names(rna.tpm) <- rna.beat.rpkm$Symbol
+row.names(rna.beat.rpkm) <- rna.beat.rpkm$Symbol
 
 # change LabId name to match AML cohort
 rna.beat.clinical$LabId_match_with_rpkm_matrix <- paste("AML-", rna.beat.clinical$LabId, sep="")
 
 # only keep Labids that match with AML cohort
+rna.beat.clinical.sel1 <- rna.beat.clinical[rna.beat.clinical$LabId_match_with_rpkm_matrix %in% colnames(rna.tpm), ]
 rna.beat.clinical.sel1 <- rna.beat.clinical[rna.beat.clinical$LabId_match_with_rpkm_matrix %in% colnames(rna.beat.rpkm), ]
 
 # select cases with the following specimenGroup
@@ -175,12 +249,60 @@ sel.specimenGroups <- c("Initial Acute Leukemia Diagnosis",
                        "Post-Chemotherapy", "Post-Chemotherapy|Relapse",
                        "Post-Chemotherapy|Residual Disease", "Residual Disease",
                        "Residual Disease|Post-Chemotherapy")
-rna.beat.clinical.sel2 <- rna.beat.clinical.sel1[rna.beat.clinical.sel1$specimenGroups %in%
-                                                   sel.specimenGroups, ]
+# remove 'Post-Chemotherapy'
+afterPCAsel <- c("Initial Acute Leukemia Diagnosis", "Post-Chemotherapy|Relapse",
+                 "Post-Chemotherapy|Residual Disease", "Residual Disease",
+                 "Residual Disease|Post-Chemotherapy")
+# select samples 
+rna.beat.clinical.sel2 <- rna.beat.clinical.sel1[rna.beat.clinical.sel1$specimenGroups %in% afterPCAsel, ]
+
+# select samples from rna matrix
+rna.tpm.sel <- rna.tpm[, rna.beat.clinical.sel2$LabId_match_with_rpkm_matrix]
+rna.beat.rpkm.sel <- rna.beat.rpkm[,rna.beat.clinical.sel2$LabId_match_with_rpkm_matrix]
+
+# sort clinical according to rna matrix rna.tpm
+rna.beat.clinical.sel2$LabId_match_with_rpkm_matrix <- factor(rna.beat.clinical.sel2$LabId_match_with_rpkm_matrix, 
+                                                              levels=colnames(rna.tpm.sel))
+rna.beat.clinical.sel2 <- rna.beat.clinical.sel2[order(rna.beat.clinical.sel2$LabId_match_with_rpkm_matrix), ]
+# sort clinical to rna matrix rna rpkm
+rna.beat.clinical.sel2$LabId_match_with_rpkm_matrix <- factor(rna.beat.clinical.sel2$LabId_match_with_rpkm_matrix, 
+                                                              levels=colnames(rna.beat.rpkm.sel))
+rna.beat.clinical.sel2 <- rna.beat.clinical.sel2[order(rna.beat.clinical.sel2$LabId_match_with_rpkm_matrix), ]
+
+# survival data
+rna.beat.clinical.sel2$status <- 1
+rna.beat.clinical.sel2[rna.beat.clinical.sel2$vitalStatus=="Dead",]$status <- 0
+survival <- data.table(
+  data.frame(
+    time=rna.beat.clinical.sel2$overallSurvival,
+    status=rna.beat.clinical.sel2$status))
+
+# change codex for survival (death=1, alive=0), needed for cox regression
+surv.dat <- data.frame(time=survival[,1], status=ifelse(survival[,2]==0,1,0))
+
+
+# create Rdata object
+aml_beat <- list(
+  genes=as.character(row.names(rna.tpm.sel)),
+  samples=as.character(colnames(rna.tpm.sel)),
+  types=rep("BEAT-AML", times=length(colnames(rna.tpm.sel))),
+  mrna.rpkm=as.matrix(rna.beat.rpkm.sel), 
+  mrna.tpm=rna.tpm.sel,
+  sex=as.character(toupper(rna.beat.clinical.sel2$consensus_sex)),
+  age=as.numeric(rna.beat.clinical.sel2$ageAtDiagnosis),
+  ethnicity=as.character(toupper(rna.beat.clinical.sel2$inferred_ethnicity)),
+  tissue=as.character(rna.beat.clinical.sel2$specimenType),
+  blastsinBM=as.numeric(rna.beat.clinical.sel2$X..Blasts.in.BM),
+  survival=survival,
+  surv.data=surv.dat
+  )
+
+# save Robject
+save(file=paste(dir.beat, "prob_aml_beat.RData", sep=""), aml_beat)
 
 ```
 
-Plot PCA
+Plot PCA (For BEAT AML)
 ```{r}
 
 mat2pca <- function(pca.matrix){
@@ -223,9 +345,9 @@ m.pcas$X..Immature.Granulocytes.in.PB <- as.numeric(m.pcas$X..Immature.Granulocy
 # plots
 # specimenGroups, X..Blasts.in.BM --> these variables show distinct clustering or gradient
 g <- ggplot(data=m.pcas, 
-            aes(x=PC1, y=PC2, colour=X..Blasts.in.BM))
+            aes(x=PC1, y=PC2, colour=ELN2017))
 g <- g + geom_point(size=2, alpha=0.7)
-g <- g + scale_color_gradient(low="blue", high="red")
+#g <- g + scale_color_gradient(low="blue", high="red")
 g <- g + theme_bw()
 plot(g)
 
@@ -238,6 +360,15 @@ aml.rna.geoquery <- getGEO("GSE67040")
 
 ```
 
+Select Ensemble mirror.
+```{r}
+# Select ensembl mirror
+ensembl <- useEnsembl(
+  biomart="ensembl", 
+  dataset="hsapiens_gene_ensembl",
+  mirror="useast")
+```
+
 Preprocess TCGA data.
 ```{r}
 # select LAML only
@@ -247,11 +378,11 @@ prob_adult_aml <- subset.prob.tcga(prob0, ix)
 # free up some memory
 rm(prob0)
 
-# select only protein coding genes
-ensembl <- useMart(
-  "ensembl", 
-  dataset="hsapiens_gene_ensembl")
+# Convert FPKM to TPM
+mrna.tpm <- apply(prob_adult_aml$mRNA, 2, function(x) fpkmToTpm(x))
+prob_adult_aml$mrna.tpm <- mrna.tpm
 
+# select only protein coding genes
 gene_biotype <- getBM(
   attributes = c('hgnc_symbol', 'gene_biotype'), 
   filters = 'hgnc_symbol', 
@@ -265,29 +396,31 @@ ix <- which(prob_adult_aml$genes %in% all_protein_coding)
 # subset matrix
 aml_intermediate <- subset.genes.prob.tcga(prob_adult_aml, ix)
 
-# only select genes with a median FPKM >1
-ix <- which(rowMedians(aml_intermediate$mRNA) > 10)
+# only select genes with a median TPM >1
+ix <- which(rowMedians(aml_intermediate$mrna.tpm) > 1)
 aml_tcga <- subset.genes.prob.tcga(aml_intermediate, ix)
 
 # assign column and rownames to mRNA
-colnames(aml_tcga$mRNA) <- aml_tcga$samples
-row.names(aml_tcga$mRNA) <- aml_tcga$genes
+colnames(aml_tcga$mrna.tpm) <- aml_tcga$samples
+row.names(aml_tcga$mrna.tpm) <- aml_tcga$genes
 
 ```
 
 Preprocess TARGET data.
 ```{r}
+# Convert FPKM to TPM
+mrna.tpm <- apply(aml.fpkms.prob.hg38$mRNA, 2, function(x) fpkmToTpm(x))
+aml.fpkms.prob.hg38$mrna.tpm <- mrna.tpm
+
 # only select protein coding genes
 aml.fpkms.prob.hg38$ensembl_version <- aml.fpkms.prob.hg38$ensembl
 aml.fpkms.prob.hg38$ensembl <- sapply(
   aml.fpkms.prob.hg38$ensembl_version, 
   function(x) strsplit(as.character(x), split="\\.")[[1]][1])
 row.names(aml.fpkms.prob.hg38$mRNA) <- aml.fpkms.prob.hg38$ensembl
+row.names(aml.fpkms.prob.hg38$mrna.tpm) <- aml.fpkms.prob.hg38$ensembl
 
-ensembl <- useMart(
-  "ensembl", 
-  dataset="hsapiens_gene_ensembl")
-
+# select only protein coding genes
 gene_biotype <- getBM(
   attributes = c('ensembl_gene_id', 'gene_biotype'), 
   filters = 'ensembl_gene_id', 
@@ -301,8 +434,8 @@ ix <- which(aml.fpkms.prob.hg38$ensembl %in% all_protein_coding)
 # subset matrix
 pediatric_aml_intermediate <- subset.genes.prob.target(aml.fpkms.prob.hg38, ix)
 
-# only select genes with a median FPKM >1
-ix <- which(rowMedians(pediatric_aml_intermediate$mRNA) > 1)
+# only select genes with a median TPM >1
+ix <- which(rowMedians(pediatric_aml_intermediate$mrna.tpm) > 1)
 pediatric_aml <- subset.genes.prob.target(pediatric_aml_intermediate, ix)
 
 # change codex for survival (death=1, alive=0), needed for cox regression
@@ -311,9 +444,33 @@ pediatric_aml$surv.data <-  data.frame(time=pediatric_aml$survival[,1],
 
 ```
 
-Prognostic genes from TCGA/TARGET.
+Preprocess BEAT AML data.
 ```{r}
-#### TCGA ----------------------------------------------------------------------
+# only select protein coding genes
+gene_biotype <- getBM(
+  attributes = c('hgnc_symbol', 'gene_biotype'), 
+  filters = 'hgnc_symbol', 
+  values = aml_beat$genes, 
+  mart = ensembl)
+
+# index of all protein coding genes
+all_protein_coding <- gene_biotype[gene_biotype$gene_biotype=="protein_coding", ]$hgnc_symbol
+ix <- which(aml_beat$genes %in% all_protein_coding)
+
+# subset matrix
+aml_beat_intermediate <- subset.genes.prob.beat(aml_beat, ix)
+
+# only select genes with a TPM greater than 1
+ix <- which(rowMedians(as.matrix(aml_beat_intermediate$mrna.tpm)) > 1)
+aml_beat_filtered <- subset.genes.prob.beat(aml_beat_intermediate, ix)
+
+# only select genes with an FPKM greater than 0 fplm=log2(1=0)
+ix <- which(rowMedians(as.matrix(aml_beat_intermediate$mrna.rpkm)) > 0)
+aml_beat_filtered <- subset.genes.prob.beat(aml_beat_intermediate, ix)
+```
+
+Prognostic genes from TCGA.
+```{r}
 
 # create dataframe
 surv_mat <- data.frame(
@@ -330,65 +487,95 @@ surv_mat <- data.frame(
 cox_data <- cbind(surv_mat, t(log2(aml_tcga$mRNA + 1)))
 scaled_data <- cbind(surv_mat, scale(t(log2(aml_tcga$mRNA + 1))))
 
-# Run Cox Surv(time, status) ~ [*] + age + strata(sex, race)
-cox_mrna <- t(apply(t(log2(aml_tcga$mRNA + 1)), 2, function(gene) cox.gene.expression(gene, surv_mat)))
+##############################################################
+# Run Cox Surv(time, status) ~ [*] + age + strata(sex, race) #
+##############################################################
+cox_mrna <- t(apply(t(log2(aml_tcga$mrna.tpm + 1)), 2, function(gene) cox.gene.expression(gene, surv_mat)))
 colnames(cox_mrna) <- c("uncntrl_coef", "uncntrl_HR", "uncntrl_se_coeff", "uncntrl_z", "uncntrl_P",
                         "cntrl_coef", "cntrl_HR", "cntrl_se_coeff", "cntrl_z", "cntrl_P")
-
 cox_mrna <- as.data.frame(cox_mrna)
-cox_mrna$cntrl_padjust <- p.adjust(cox_mrna$cntrl_P, method="BH")
 cox_mrna$uncntrl_padjust <- p.adjust(cox_mrna$uncntrl_P, method="BH")
-cox_mrna$hgnc_symbol <- row.names(cox_mrna)
+cox_mrna$cntrl_padjust <- p.adjust(cox_mrna$cntrl_P, method="BH")
 
-# Plot Hazard ratio vs P value
-p <- ggplot(data=cox_mrna, aes(x=log2(cntrl_HR), y=-log10(cntrl_P)))
+# save results
+# select all with a cntrl pvalue <0.2
+cox_mrna_0p2 <- cox_mrna[cox_mrna$cntrl_padjust < 0.2, ] 
+# annotate top genes with biomart
+gene_biotype <- getBM(
+  attributes = c('hgnc_symbol', 'description'), 
+  filters = 'hgnc_symbol', 
+  values = rownames(cox_mrna_0p2), 
+  mart = ensembl)
+# add gene names
+cox_mrna_0p2$hgnc_symbol <- rownames(cox_mrna_0p2) 
+# merge
+cox_mrna_merge <- merge(cox_mrna_0p2, gene_biotype, by="hgnc_symbol", all.x=TRUE )
+# sort by pvalue
+cox_mrna_merge <- cox_mrna_merge[order(cox_mrna_merge$cntrl_padjust), ]
+# write table
+write.csv(cox_mrna_merge, file=paste(dir.save, "cox_tcga_tpm_results_with_description.csv", sep="/"), row.names=TRUE)
+
+############################################################################
+# Run Cox with scaled data, standardized each gene expression distribution #
+############################################################################
+scaled_data <- scale(t(log2(aml_tcga$mrna.tpm + 1)))
+cox_mrna_scaled <- t(apply(scaled_data, 2, function(gene) cox.gene.expression(gene, surv_mat)))
+colnames(cox_mrna_scaled) <- c("uncntrl_coef", "uncntrl_HR", "uncntrl_se_coeff", "uncntrl_z", "uncntrl_P",
+                        "cntrl_coef", "cntrl_HR", "cntrl_se_coeff", "cntrl_z", "cntrl_P")
+cox_mrna_scaled <- as.data.frame(cox_mrna_scaled)
+cox_mrna_scaled$cntrl_padjust <- p.adjust(cox_mrna_scaled$cntrl_P, method="BH")
+cox_mrna_scaled$uncntrl_padjust <- p.adjust(cox_mrna_scaled$uncntrl_P, method="BH")
+
+# save results
+# select all with a cntrl pvalue <0.2
+cox_mrna_scaled_0p2 <- cox_mrna_scaled[cox_mrna_scaled$cntrl_padjust < 0.2, ] 
+# annotate top genes with biomart
+gene_biotype <- getBM(
+  attributes = c('hgnc_symbol', 'description'), 
+  filters = 'hgnc_symbol', 
+  values = rownames(cox_mrna_scaled_0p2), 
+  mart = ensembl)
+# add gene names
+cox_mrna_scaled_0p2$hgnc_symbol <- rownames(cox_mrna_scaled_0p2) 
+# merge
+cox_mrna_scaled_merge <- merge(cox_mrna_scaled_0p2, gene_biotype, by="hgnc_symbol", all.x=TRUE )
+# sort by pvalue
+cox_mrna_scaled_merge <- cox_mrna_scaled_merge[order(cox_mrna_scaled_merge$cntrl_padjust), ]
+# write table
+write.csv(cox_mrna_scaled_merge, file=paste(dir.save, "cox_tcga_scaled_tpm_results_with_description.csv", sep="/"), row.names=TRUE)
+
+################################ 
+# Plot Hazard ratio vs P value #
+################################
+# for plotting
+cox_mrna <- cox_mrna_scaled
+cox_mrna$hgnc_symbol <- rownames(cox_mrna)
+
+p <- ggplot(data=cox_mrna, aes(x=log(cntrl_HR), y=-log10(cntrl_P)))
 p <- p + geom_point(fill="blue", colour="white", pch=21, alpha=0.5, size=2.5)
 p <- p + geom_point(data=cox_mrna[cox_mrna$cntrl_padjust < 0.05, ], 
-                    aes(x=log2(cntrl_HR), y=-log10(cntrl_P)),
+                    aes(x=log(cntrl_HR), y=-log10(cntrl_P)),
                     fill="red", colour="white", pch=21, alpha=0.5, size=2.5)
 p <- p + geom_text_repel(data=cox_mrna[cox_mrna$cntrl_padjust < 0.05 & log2(cox_mrna$cntrl_HR) > 0 , ], 
-                         aes(x=log2(cntrl_HR), y=-log10(cntrl_P), label=hgnc_symbol), 
+                         aes(x=log(cntrl_HR), y=-log10(cntrl_P), label=hgnc_symbol), 
                          color="red")
 p <- p + geom_text_repel(data=cox_mrna[cox_mrna$cntrl_padjust < 0.05 & log2(cox_mrna$cntrl_HR) < 0 , ], 
-                         aes(x=log2(cntrl_HR), y=-log10(cntrl_P), label=hgnc_symbol), 
+                         aes(x=log(cntrl_HR), y=-log10(cntrl_P), label=hgnc_symbol), 
                          color="blue")
-p <- p + coord_fixed(ratio = 1)
+#p <- p + coord_fixed(ratio = 1)
 p <- p + theme_bw()
 p <- p + theme(axis.text.x=element_text(colour="black", size=10), 
                axis.text.y=element_text(colour="black", size=10))
 print(p)
 
-fn <- sprintf(paste(dir.figures, "cox_tcga_cntrl_fdr0p5.pdf", sep=""))
-pdf(fn, height=6, width=6)
-print(p)
-dev.off()
-
-# Plot Hazard ratio vs P value 
-# for uncntrl
-p <- ggplot(data=cox_mrna, aes(x=log2(uncntrl_HR), y=-log10(uncntrl_P)))
-p <- p + geom_point(fill="blue", colour="white", pch=21, alpha=0.5, size=2.5)
-p <- p + geom_point(data=cox_mrna[cox_mrna$uncntrl_padjust < 0.01, ], 
-                    aes(x=log2(uncntrl_HR), y=-log10(uncntrl_P)),
-                    fill="red", colour="white", pch=21, alpha=0.5, size=2.5)
-p <- p + geom_text_repel(data=cox_mrna[cox_mrna$uncntrl_padjust < 0.01 & log2(cox_mrna$uncntrl_HR) > 0 , ], 
-                         aes(x=log2(uncntrl_HR), y=-log10(uncntrl_P), label=hgnc_symbol), 
-                         color="red")
-p <- p + geom_text_repel(data=cox_mrna[cox_mrna$uncntrl_padjust < 0.01 & log2(cox_mrna$uncntrl_HR) < 0 , ], 
-                         aes(x=log2(uncntrl_HR), y=-log10(uncntrl_P), label=hgnc_symbol), 
-                         color="blue")
-p <- p + coord_fixed(ratio = 1)
-p <- p + theme_bw()
-p <- p + theme(axis.text.x=element_text(colour="black", size=10), 
-               axis.text.y=element_text(colour="black", size=10))
-print(p)
-
-fn <- sprintf(paste(dir.figures, "cox_tcga_uncntrl_fdr0p1.pdf", sep=""))
+fn <- sprintf(paste(dir.figures, "cox_tcga_scaled_tpm_cntrl_fdr0p5.pdf", sep=""))
 pdf(fn, height=8, width=8)
 print(p)
 dev.off()
+```
 
-
-#### TARGET --------------------------------------------------------------------
+Prognositic genes for TARGET
+```{r}
 
 surv_mat <- data.frame(
   samples=pediatric_aml$samples,
@@ -400,52 +587,44 @@ surv_mat <- data.frame(
   time=pediatric_aml$surv.data$time,
   status=pediatric_aml$surv.data$status)
 
-# merge and transform data
-# take log2 of FPKM values
-cox_data <- cbind(surv_mat, t(log2(pediatric_aml$mRNA + 1)))
-scaled_data <- cbind(surv_mat, scale(t(log2(pediatric_aml$mRNA + 1 ))))
+# scale data
+scaled_data <- scale(t(log2(pediatric_aml$mrna.tpm + 1 )))
 
-# Run Cox in parallel
-res <- RegParallel(
-  data = cox_data,
-  formula = 'Surv(time, status) ~ [*] + age + strata(sex, race, ethnicity, tissue)',
-  FUN = function(formula, data)
-    coxph(formula = formula,
-          data = data,
-          ties = 'efron'),
-  FUNtype = 'coxph',
-  variables = colnames(cox_data)[9:ncol(cox_data)],
-  blocksize = 1000,
-  cores = 2,
-  nestedParallel = FALSE,
-  conflevel = 95,
-  p.adjust = "BH")
+# Run Cox 
+cox_mrna <- t(apply(t(log2(pediatric_aml$mrna.tpm + 1 )), 2, function(gene) cox.gene.expression.target(gene, surv_mat)))
+colnames(cox_mrna) <- c("uncntrl_coef", "uncntrl_HR", "uncntrl_se_coeff", "uncntrl_z", "uncntrl_P",
+                        "cntrl_coef", "cntrl_HR", "cntrl_se_coeff", "cntrl_z", "cntrl_P")
+cox_mrna <- as.data.frame(cox_mrna)
+cox_mrna$uncntrl_padjust <- p.adjust(cox_mrna$uncntrl_P, method="BH")
+cox_mrna$cntrl_padjust <- p.adjust(cox_mrna$cntrl_P, method="BH")
+cox_mrna$ensembl_gene_id <- rownames(cox_mrna)
 
-# Annotate results
-res_noAge <- res[res$Term!="age", ]
-gene_hgnc<- getBM(
-  attributes = c('ensembl_gene_id', 'hgnc_symbol'), 
+# annotate genes with biomart
+gene_biotype <- getBM(
+  attributes = c('ensembl_gene_id', 'hgnc_symbol', 'description'), 
   filters = 'ensembl_gene_id', 
-  values = res_noAge$Variable, 
+  values = cox_mrna$ensembl_gene_id, 
   mart = ensembl)
 
-# Merge annotation
-m.res <- merge(res_noAge, gene_hgnc, by.x="Variable", by.y="ensembl_gene_id", all.x = TRUE)
+# merge
+cox_mrna_m <- merge(cox_mrna, gene_biotype, by="ensembl_gene_id", all.x=TRUE)
 
-# Plot results
-m.res[order(m.res$P, decreasing=FALSE), ]
+# sort by pvalue
+cox_mrna_m <- cox_mrna_m[order(cox_mrna_m$cntrl_P), ]
+# write table
+write.csv(cox_mrna_m, file=paste(dir.save, "cox_TARGET_tpm_results_with_description.csv", sep="/"), row.names=TRUE)
 
-# Plot Hazard ratio vs P value
-p <- ggplot(data=m.res, aes(x=log2(HR), y=-log10(P)))
+# plotting
+p <- ggplot(data=cox_mrna_m, aes(x=log2(cntrl_HR), y=-log10(cntrl_P)))
 p <- p + geom_point(fill="blue", colour="white", pch=21, alpha=0.5, size=2.5)
-p <- p + geom_point(data=m.res[m.res$P.adjust < 0.05, ], 
-                    aes(x=log2(HR), y=-log10(P)),
+p <- p + geom_point(data=cox_mrna_me[cox_mrna_m$cntrl_padjust < 0.05, ], 
+                    aes(x=log2(cntrl_HR), y=-log10(cntrl_P)),
                     fill="red", colour="white", pch=21, alpha=0.5, size=2.5)
-p <- p + geom_text_repel(data=m.res[m.res$P.adjust < 0.05 & log2(m.res$HR) > 0 , ], 
-                         aes(x=log2(HR), y=-log10(P), label=hgnc_symbol), 
+p <- p + geom_text_repel(data=cox_mrna_m[cox_mrna_m$cntrl_padjust < 0.05 & log2(cox_mrna_m$cntrl_HR) > 0 , ], 
+                         aes(x=log2(cntrl_HR), y=-log10(cntrl_P), label=hgnc_symbol), 
                          color="red")
-p <- p + geom_text_repel(data=m.res[m.res$P.adjust < 0.05 & log2(m.res$HR) < 0 , ], 
-                         aes(x=log2(HR), y=-log10(P), label=hgnc_symbol), 
+p <- p + geom_text_repel(data=cox_mrna_m[cox_mrna_m$cntrl_padjust < 0.05 & log2(cox_mrna_m$cntrl_HR) < 0 , ], 
+                         aes(x=log2(cntrl_HR), y=-log10(cntrl_P), label=hgnc_symbol), 
                          color="blue")
 p <- p + coord_fixed(ratio = 1)
 p <- p + theme_bw()
@@ -453,12 +632,101 @@ p <- p + theme(axis.text.x=element_text(colour="black", size=10),
                axis.text.y=element_text(colour="black", size=10))
 print(p)
 
-fn <- sprintf(paste(dir.figures, "cox_covar_age.sex.race.ethnicity.pdf", sep=""))
-pdf(fn, height=6, width=6)
+fn <- sprintf(paste(dir.figures, "cox_target_tpm_cntrl_fdr0p5.pdf", sep=""))
+pdf(fn, height=8, width=8)
+print(p)
+dev.off()
+```
+
+Prognostic genes for BEAT AML
+```{r}
+
+# create dataframe
+surv_mat <- data.frame(
+  samples=aml_beat_filtered$samples,
+  sex=aml_beat_filtered$sex,
+  age=aml_beat_filtered$age,
+  ethnicity=aml_beat_filtered$ethnicity,
+  tissue=aml_beat_filtered$tissue,
+  blastsinBM=aml_beat_filtered$blastsinBM,
+  time=aml_beat_filtered$surv.data$time,
+  status=aml_beat_filtered$surv.data$status)
+
+# Run Cox Surv(time, status) ~ [*] + age + strata(sex, ethnicity)
+cox_mrna <- t(apply(t(log2(aml_beat_filtered$mrna.tpm + 1)), 2, function(gene) cox.gene.expression.beat(gene, surv_mat)))
+# scaled version
+scaled_data <- scale(t(log2(aml_beat_filtered$mrna.tpm + 1)))
+cox_mrna <- t(apply(scaled_data, 2, function(gene) cox.gene.expression.beat(gene, surv_mat)))
+
+# Run Cox Surv(time, status) ~ [*] + age + strata(sex, ethnicity) RPKM
+cox_mrna <- t(apply(t(aml_beat_filtered$mrna.rpkm), 2, function(gene) cox.gene.expression.beat(gene, surv_mat)))
+# scaled version
+scaled_data <- scale(t(aml_beat_filtered$mrna.rpkm))
+cox_mrna <- t(apply(scaled_data, 2, function(gene) cox.gene.expression.beat(gene, surv_mat)))
+
+# rename column
+colnames(cox_mrna) <- c("uncntrl_coef", "uncntrl_HR", "uncntrl_se_coeff", "uncntrl_z", "uncntrl_P",
+                        "cntrl_noblast_coef", "cntrl_noblast_HR", "cntrl_noblast_se_coeff", "cntrl_noblast_z", "cntrl_noblast_P",
+                        "cntrl_coef", "cntrl_HR", "cntrl_se_coeff", "cntrl_z", "cntrl_P")
+
+cox_mrna <- as.data.frame(cox_mrna)
+cox_mrna$cntrl_padjust <- p.adjust(cox_mrna$cntrl_P, method="BH")
+cox_mrna$uncntrl_padjust <- p.adjust(cox_mrna$uncntrl_P, method="BH")
+cox_mrna$cntrl_noblast_padjust <- p.adjust(cox_mrna$cntrl_noblast_P, method="BH")
+cox_mrna$hgnc_symbol <- row.names(cox_mrna)
+
+# save results
+# write table
+write.csv(cox_mrna, file=paste(dir.save, "cox_beat_tpm_results.csv", sep="/"), row.names=TRUE)
+write.csv(cox_mrna, file=paste(dir.save, "cox_beat_rpkm_results.csv", sep="/"), row.names=TRUE)
+
+
+# Plot Hazard ratio vs P value
+p <- ggplot(data=cox_mrna, aes(x=log(cntrl_HR), y=-log10(cntrl_P)))
+p <- p + geom_point(fill="blue", colour="white", pch=21, alpha=0.5, size=2.5)
+p <- p + geom_point(data=cox_mrna[cox_mrna$cntrl_padjust < 0.05, ], 
+                    aes(x=log(cntrl_HR), y=-log10(cntrl_P)),
+                    fill="red", colour="white", pch=21, alpha=0.5, size=2.5)
+p <- p + geom_text_repel(data=cox_mrna[cox_mrna$cntrl_padjust < 0.05 & log(cox_mrna$cntrl_HR) > 0 , ], 
+                         aes(x=log(cntrl_HR), y=-log10(cntrl_P), label=hgnc_symbol), 
+                         color="red")
+p <- p + geom_text_repel(data=cox_mrna[cox_mrna$cntrl_padjust < 0.05 & log(cox_mrna$cntrl_HR) < 0 , ], 
+                         aes(x=log(cntrl_HR), y=-log10(cntrl_P), label=hgnc_symbol), 
+                         color="blue")
+#p <- p + coord_fixed(ratio = 1)
+p <- p + theme_bw()
+p <- p + theme(axis.text.x=element_text(colour="black", size=10), 
+               axis.text.y=element_text(colour="black", size=10))
+print(p)
+
+fn <- sprintf(paste(dir.figures, "cox_beat_rpkm_cntrl_fdr0p05.pdf", sep=""))
+pdf(fn, height=6, width=8)
 print(p)
 dev.off()
 
- 
+# Plot Hazard ratio vs P value noblast
+p <- ggplot(data=cox_mrna, aes(x=log(cntrl_noblast_HR), y=-log10(cntrl_noblast_P)))
+p <- p + geom_point(fill="blue", colour="white", pch=21, alpha=0.5, size=2.5)
+p <- p + geom_point(data=cox_mrna[cox_mrna$cntrl_noblast_padjust < 0.05, ], 
+                    aes(x=log(cntrl_noblast_HR), y=-log10(cntrl_noblast_P)),
+                    fill="red", colour="white", pch=21, alpha=0.5, size=2.5)
+p <- p + geom_text_repel(data=cox_mrna[cox_mrna$cntrl_noblast_padjust < 0.05 & log(cox_mrna$cntrl_noblast_HR) > 0 , ], 
+                         aes(x=log(cntrl_noblast_HR), y=-log10(cntrl_noblast_P), label=hgnc_symbol), 
+                         color="red")
+p <- p + geom_text_repel(data=cox_mrna[cox_mrna$cntrl_noblast_padjust < 0.05 & log(cox_mrna$cntrl_noblast_HR) < 0 , ], 
+                         aes(x=log(cntrl_noblast_HR), y=-log10(cntrl_noblast_P), label=hgnc_symbol), 
+                         color="blue")
+#p <- p + coord_fixed(ratio = 1)
+p <- p + theme_bw()
+p <- p + theme(axis.text.x=element_text(colour="black", size=10), 
+               axis.text.y=element_text(colour="black", size=10))
+print(p)
+
+fn <- sprintf(paste(dir.figures, "cox_beat_rpkm_cntrl_noblast_fdr0p05.pdf", sep=""))
+pdf(fn, height=6, width=8)
+print(p)
+dev.off()
+
 ```
 
 Plot survival (Kaplan Maier plots).
@@ -505,6 +773,154 @@ p <- ggsurvplot(
 fn <- sprintf(paste(dir.figures, "kaplan_maier_DDX3Y.pdf", sep=""))
 pdf(fn, height=6, width=6)
 print(p)
+dev.off()
+
+```
+
+Overlap significant genes with the cancer dependency map.
+```{r}
+
+# Q: Take the top ranked genes and compare their dependency in AML-specific vs non AML-specific cell lines
+# Take the ranking of the cell lines....
+# Note: Essentiality imputation: was removed
+
+# Rank normalizaion function
+rank.array <- function(mat){
+  mat.back = mat 
+  mat = mat[!is.na(mat)]
+  mat = rank(mat, ties.method = "average")/length(mat);
+  mat.back[!is.na(mat.back)] = mat
+  mat.back
+}
+
+# Run wilcoxon
+test.sig <- function(cox_mrna, depmap_19Q3_rank_norm, random=FALSE, rand.num=42){
+  # select significant genes with adverse risk
+  if(random){
+    sig.genes <-  rownames(depmap_19Q3_rank_norm)[sample(1:nrow(depmap_19Q3_rank_norm), rand.num)]
+    
+  }
+  else{
+    sig.genes <- cox_mrna[cox_mrna$cntrl_noblast_padjust < 0.05 & 
+                                  cox_mrna$cntrl_noblast_HR >1,]$hgnc_symbol
+  }
+  
+  # Select genes to compare:
+  sel.genes <- which(rownames(depmap_19Q3_rank_norm) %in% sig.genes)
+  depmap_sel <- depmap_19Q3_rank_norm[sel.genes, ]
+  
+  # test using wilcoxon:
+  wilcoxon_dep <- apply(depmap_sel, 1, function(x) wilcox.test(
+  x[aml_cell_lines], x[non_aml_cl] , alternative='less')$p.value)
+  
+  return(wilcoxon_dep)
+}
+
+
+# Select AML cell lines: 
+aml_cell_lines <- rownames(depmap_19Q3$meta[depmap_19Q3$meta$lineage_subtype=="AML", ])
+non_aml_cl <- rownames(depmap_19Q3$meta[depmap_19Q3$meta$lineage_subtype!="AML", ])
+adult_aml_cl <- rownames(depmap_19Q3$meta[depmap_19Q3$meta$lineage_subtype=="AML" & 
+                                            depmap_19Q3$meta$age > 20, ])
+adult_aml_cl <- adult_aml_cl[grepl('^ACH', adult_aml_cl)]
+
+# Rank normalized essentiality matrix
+depmap_19Q3_rank_norm <- apply(depmap_19Q3$avana, 2, rank.array)
+
+# Run test once for significant genes
+wilcox.pvalues <- test.sig(cox_mrna, depmap_19Q3_rank_norm, random=FALSE)
+
+# How many are significant ?
+table(wilcox.pvalues < 0.1) [2]
+
+# Calculate empirical p-value:
+# Empirical pvalues are calculated as p=r/n, where
+# n is the number of replicate samples and r is the 
+# number of these replicates that produce a test statistic 
+# greater than or equal to that calculated for the actual data
+
+wilcoxon.empirical.p <- function(repeat.n=100, p.threshold){
+  for(i in 1:repeat.n){
+    wilcox_pvalues <- test.sig(cox_mrna_merge, depmap_19Q3_rank_norm, random=TRUE)
+    results[i, ] <- as.numeric(table(wilcox_pvalues < p.threshold))
+  }
+  return(results)
+}
+
+# run function for 0.1 threshold
+results <- data.frame(false.events=numeric(), true.events=numeric())
+results <- wilcoxon.empirical.p(repeat.n=1000, p.threshold=0.1)
+# count empirical p
+table(results$true.events >= as.numeric(table(wilcoxon_dep <= 0.1)[2]))/1000
+# FALSE  TRUE 
+# 0.935 0.065
+
+# run function for 0.05 threshold
+results <- data.frame(false.events=numeric(), true.events=numeric())
+results <- wilcoxon.empirical.p(repeat.n=1000, p.threshold=0.05)
+# count empirical p
+table(results$true.events >= as.numeric(table(wilcoxon_dep < 0.05)[2]))/1000
+# FALSE  TRUE 
+# 0.562 0.438
+
+# plot data
+# wilcox.pvalues
+
+generate.plot.df <- function(
+  genes=c("CCND3"),
+  aml_cell_lines,
+  non_aml_cl,
+  adult_aml_cl){
+  
+  dependency_score <- reshape2::melt(t(depmap_19Q3$avana[genes, ]))
+  colnames(dependency_score) <- c("cl_id", "gene_name", "dependency_score")
+  norm_rank <- reshape2::melt(t(depmap_19Q3_rank_norm[genes, ]))
+  colnames(norm_rank) <- c("cl_id", "gene_name", "norm_rank")
+  df_g <- cbind(dependency_score, norm_rank=norm_rank$norm_rank)
+  # add grouping
+  df_g$grouping <- "other_cell_line"
+  df_g[df_g$cl_id %in% aml_cell_lines, ]$grouping <- "pediatric_AML_specific"
+  df_g[df_g$cl_id %in% non_aml_cl, ]$grouping <- "non-AML_specific"
+  df_g[df_g$cl_id %in% adult_aml_cl, ]$grouping <- "adult_AML_specific"
+  
+return(df_g)
+}
+
+# Plot 
+selec <- names(which(wilcox.pvalues < 0.1))
+selec <- names(wilcox.pvalues)
+df_g <- generate.plot.df(genes=selec,
+                         aml_cell_lines=aml_cell_lines, 
+                         non_aml_cl=non_aml_cl, 
+                         adult_aml_cl=adult_aml_cl)
+
+# Give cell lines meaningful names
+cl_name <- depmap_19Q3$meta[c("stripped_cell_line_name")]
+cl_name$cl_id <- row.names(cl_name) 
+df_gm <- merge(df_g, cl_name, by="cl_id")
+
+g <- ggplot(df_gm, aes(x=dependency_score, y=norm_rank, fill=grouping))
+g <- g + geom_point(
+  pch=21, colour="black", fill="grey", size=3, alpha=0.8)
+g <- g + geom_point(
+  data=df_gm[df_gm$grouping=="adult_AML_specific", ], 
+  aes(x=dependency_score, y=norm_rank), 
+  pch=21, colour="black", fill="red", size=3, alpha=0.8)
+g <- g + geom_point(
+  data=df_gm[df_gm$grouping=="pediatric_AML_specific", ], 
+  aes(x=dependency_score, y=norm_rank), 
+  pch=21, colour="black", fill="yellow", size=3, alpha=0.8)
+g <- g + geom_vline(xintercept= (-1), colour="red")
+g <- g + geom_text_repel(
+  data=df_gm[df_gm$dependency_score < (-1) & df_gm$grouping!="non-AML_specific", ], 
+  aes(x=dependency_score, y=norm_rank, label=stripped_cell_line_name), color="blue")
+g <- g + facet_wrap(~ gene_name)
+plot(g)
+
+# save plot
+fn <- sprintf(paste(dir.figures, "depmap_BEAT_tpm_cntrl_fdr0p05_wilcox_all_gene_name.pdf", sep=""))
+pdf(fn, height=8, width=12)
+print(g)
 dev.off()
 
 ```
@@ -567,8 +983,242 @@ for (gene in row.names(sig_genes_good)){
 df <- data.frame(gene=row.names(sig_genes_good), stat_wilcox=stat)
 
       
+```
 
+Mine drug response data.
+```{r}
+# Which genes are drug targets?
 
+#TCGA genes
+cox_res <- read.csv(file=paste(dir.save, "cox_tcga_tpm_results_with_description.csv", sep="/"))
+sig.genes <- cox_res[cox_res$cntrl_padjust < 0.05 & cox_res$cntrl_HR > 1, ]
+
+drug.target.list <- sapply(as.list(depmap_19Q3$drug_target_map$target), 
+                           function(x) unlist(strsplit(gsub(" ", "", x, fixed = TRUE), split=",")))
+annotate.drug <- function(drug.target.list=drug.target.list, gene.list=gene){
+  drug.target.match.line <- c()
+  for (gene in gene.list){
+      dtm <- paste0(
+        unique(depmap_19Q3$drug_target_map[
+          which(
+            sapply(
+              drug.target.list, function(x) gene %in% x)),]$name), collapse=",")
+      drug.target.match.line <- c(drug.target.match.line, dtm)
+  }
+  return(drug.target.match.line)
+}
+# method "single"
+sig.genes$drugs <- annotate.drug(drug.target.list=drug.target.list, gene.list=as.character(sig.genes$hgnc_symbol))
+
+# Q: Compare sensitivity between AML and non AML cell lines
+drugs.to.test <- unlist(strsplit(paste(sig.genes[which(sig.genes$drugs != ""), ]$drugs, collapse = ","), ","))
+
+ix <- which(depmap_19Q3$drug_target_map$name %in% drugs.to.test)
+drugs_list <- depmap_19Q3$drug_target_map[which(depmap_19Q3$drug_target_map$name %in% drugs.to.test), ]
+
+# Run each drug with wilcox
+test.each.drug <- function(depmap_19Q3_rank_norm, drug_list){
+
+  # Select genes to compare:
+  sel_drugs <- which(rownames(depmap_19Q3_rank_norm) %in% drug_list)
+  depmap_sel <- depmap_19Q3_rank_norm[sel_drugs, ]
+  
+  # test using wilcoxon:
+  wilcoxon_dep <- apply(depmap_sel, 1, function(x) wilcox.test(
+  x[aml_cell_lines], x[non_aml_cl] , alternative='less')$p.value)
+  
+  return(wilcoxon_dep)
+}
+
+# Rank normalize drug PRISM
+depmap_19Q3_rank_norm <- apply(depmap_19Q3$drug_prism, 2, rank.array)
+# try other dataset
+row.names(prob.ctrp$mat) <- prob.ctrp$drugs
+colnames(prob.ctrp$mat) <- prob.ctrp$celllines
+ctrp_rank_norm <- apply(prob.ctrp$mat, 2, rank.array)
+
+# only matching drug is bosutinib
+
+# Run cox, ISSIE PRISM does not have a single AML cell line !!!!!
+aml_cell_lines <- depmap_19Q3$meta[depmap_19Q3$meta$lineage_subtype=="AML", ]$stripped_cell_line_name
+non_aml_cl <- depmap_19Q3$meta[depmap_19Q3$meta$lineage_subtype!="AML", ]$stripped_cell_line_name
+aml_cell_lines <- aml_cell_lines[which(colnames(depmap_19Q3_rank_norm) %in% aml_cell_lines)]
+non_aml_cl <- non_aml_cl[which(colnames(depmap_19Q3_rank_norm) %in% non_aml_cl)]
+test.each.drug(depmap_19Q3_rank_norm, drug_list=drugs_list$broad_id_trimmed)
+
+# same for CTRP
+aml_cell_lines <- depmap_19Q3$meta[depmap_19Q3$meta$lineage_subtype=="AML", ]$stripped_cell_line_name
+non_aml_cl <- depmap_19Q3$meta[depmap_19Q3$meta$lineage_subtype!="AML", ]$stripped_cell_line_name
+
+amL_cell_lines <- aml_cell_lines[aml_cell_lines %in% colnames(ctrp_rank_norm)]
+non_aml_cl <- non_aml_cl[non_aml_cl %in% colnames(ctrp_rank_norm)]
+
+# select drugs
+ctrp.matching.drugs <- drugs.to.test[which(drugs.to.test %in% rownames(ctrp_rank_norm))]
+comp <- ctrp_rank_norm[ctrp.matching.drugs, ]
+
+wilcox.test(comp[aml_cell_lines], comp[non_aml_cl] , alternative='less')
+
+```
+
+Independet validation.
+```{r}
+#TCGA genes
+cox_res <- read.csv(file=paste(dir.save, "cox_tcga_tpm_results_with_description.csv", sep="/"))
+sig.genes <- cox_res[cox_res$cntrl_padjust < 0.05 , ]
+sig.genes$cntrl_log_HR <- log(sig.genes$cntrl_HR)
+
+# IS IT PREDICTIVE WITHIN THE SAME COHORT (TCGA)?  CROSS VALIDATION
+ix <- which(row.names(aml_tcga$mrna.tpm) %in% as.character(sig.genes$hgnc_symbol))
+tcga_genes <- aml_tcga$mrna.tpm[ix, ]
+tcga_genes <- log2(tcga_genes + 1)
+
+sig.genes <- sig.genes[sig.genes$hgnc_symbol %in% row.names(tcga_genes), ]
+sig.genes$hgnc_symbol <- factor(sig.genes$hgnc_symbol, levels=row.names(tcga_genes))
+sig.genes <- na.omit(sig.genes[order(sig.genes$hgnc_symbol), ])
+sig.genes$cntrl_log_HR <- log(sig.genes$cntrl_HR)
+
+# Risk_score for each patient
+weighted.hr <- apply(tcga_genes, 2, function(x) x*sig.genes$cntrl_log_HR)
+risk_score_per_patient <- apply(weighted.hr, 2, sum)
+ihi <- which(risk_score_per_patient > quantile(risk_score_per_patient, 0.5, na.rm=TRUE))
+ilo <- which(risk_score_per_patient <= quantile(risk_score_per_patient, 0.5, na.rm=TRUE))
+
+df <- data.frame(patient=names(risk_score_per_patient), 
+                 risk_score=risk_score_per_patient,
+                 grouping=xtile(risk_score_per_patient, 3))
+
+#Compare survival between ihi and ilo
+surv_mat <- data.frame(
+  samples=aml_tcga$samples,
+  sex=aml_tcga$sex,
+  age=aml_tcga$age,
+  race=aml_tcga$race,
+  time=aml_tcga$surv.dt$time,
+  status=aml_tcga$surv.dt$status)
+
+surv_mat$strata <- "mid"
+surv_mat[surv_mat$samples %in% as.character(df[df$grouping==3,]$patient), ]$strata <- "ihi"
+surv_mat[surv_mat$samples %in% as.character(df[df$grouping==1,]$patient), ]$strata <- "ilo"
+
+p <- ggsurvplot(
+  survfit(Surv(time, status) ~ strata, data = surv_mat),
+  data = surv_mat,
+  risk.table = TRUE,
+  pval = TRUE,
+  break.time.by = 500,
+  ggtheme = theme_minimal(),
+  risk.table.y.text.col = TRUE,
+  risk.table.y.text = FALSE)
+
+# BEAT COHORT
+# for each patient calculate a risk score (in BEAT study)
+ix <- which(row.names(aml_beat$mrna.tpm) %in% as.character(sig.genes$hgnc_symbol))
+beat_genes <- aml_beat$mrna.tpm[ix, ]
+beat_genes <- log2(beat_genes + 1)
+sig.genes <- sig.genes[sig.genes$hgnc_symbol %in% row.names(beat_genes), ]
+sig.genes$hgnc_symbol <- factor(sig.genes$hgnc_symbol, levels=row.names(beat_genes))
+sig.genes <- na.omit(sig.genes[order(sig.genes$hgnc_symbol), ])
+sig.genes$cntrl_log_HR <- log(sig.genes$cntrl_HR)
+# Risk_score for each patient
+weighted.hr <- apply(beat_genes, 2, function(x) x*sig.genes$cntrl_log_HR)
+risk_score_per_patient <- apply(weighted.hr, 2, sum)
+ihi <- which(risk_score_per_patient > quantile(risk_score_per_patient, 0.5, na.rm=TRUE))
+ilo <- which(risk_score_per_patient <= quantile(risk_score_per_patient, 0.5, na.rm=TRUE))
+
+df <- data.frame(patient=names(risk_score_per_patient), 
+                 risk_score=risk_score_per_patient,
+                 grouping=xtile(risk_score_per_patient, 3))
+
+#Compare survival between ihi and ilo
+surv_mat <- data.frame(
+  samples=aml_beat$samples,
+  sex=aml_beat$sex,
+  age=aml_beat_filtered$age,
+  ethnicity=aml_beat$ethnicity,
+  tissue=aml_beat$tissue,
+  blastsinBM=aml_beat$blastsinBM,
+  time=aml_beat$surv.data$time,
+  status=aml_beat$surv.data$status)
+
+surv_mat$strata <- "mid"
+surv_mat[surv_mat$samples %in% as.character(df[df$grouping==3,]$patient), ]$strata <- "ihi"
+surv_mat[surv_mat$samples %in% as.character(df[df$grouping==1,]$patient), ]$strata <- "ilo"
+
+p <- ggsurvplot(
+  survfit(Surv(time, status) ~ strata, data = surv_mat),
+  data = surv_mat,
+  risk.table = TRUE,
+  pval = TRUE,
+  break.time.by = 500,
+  ggtheme = theme_minimal(),
+  risk.table.y.text.col = TRUE,
+  risk.table.y.text = FALSE)
+
+fn <- sprintf(paste(dir.figures, "kaplan_maier_risk_score.pdf", sep=""))
+pdf(fn, height=6, width=6)
+print(p)
+dev.off()
+
+# REPEAT THE SAME IN TARGET COHORT
+# add surv.data
+aml.fpkms.prob.hg38$surv.data <- data.frame(
+  time=aml.fpkms.prob.hg38$survival[,1], 
+  status=ifelse(aml.fpkms.prob.hg38$survival[,2]==0,1,0))
+# only select protein coding genes
+row.names(aml.fpkms.prob.hg38$mrna.tpm) <- aml.fpkms.prob.hg38$genes
+target_aml <- log2(aml.fpkms.prob.hg38$mrna.tpm + 1) 
+ix <- which(row.names(target_aml) %in% as.character(sig.genes$hgnc_symbol))
+target_genes <- target_aml[ix, ]
+# romove last PRICKLE4
+target_genes <- target_genes[1:(dim(target_genes)[1]-1), ]
+
+sig.genes <- sig.genes[sig.genes$hgnc_symbol %in% row.names(target_genes), ]
+sig.genes$hgnc_symbol <- factor(sig.genes$hgnc_symbol, levels=unique(row.names(target_genes)))
+sig.genes <- na.omit(sig.genes[order(sig.genes$hgnc_symbol), ])
+sig.genes$cntrl_log_HR <- log(sig.genes$cntrl_HR)
+# Risk_score for each patient
+weighted.hr <- apply(target_genes, 2, function(x) x*sig.genes$cntrl_log_HR)
+risk_score_per_patient <- apply(weighted.hr, 2, sum)
+ihi <- which(risk_score_per_patient > quantile(risk_score_per_patient, 0.5, na.rm=TRUE))
+ilo <- which(risk_score_per_patient <= quantile(risk_score_per_patient, 0.5, na.rm=TRUE))
+
+df <- data.frame(patient=names(risk_score_per_patient), 
+                 risk_score=risk_score_per_patient,
+                 grouping=xtile(risk_score_per_patient, 3))
+
+#Compare survival between ihi and ilo
+surv_mat <- data.frame(
+  samples=aml.fpkms.prob.hg38$samples,
+  sex=aml.fpkms.prob.hg38$sex,
+  age=aml.fpkms.prob.hg38$age,
+  ethnicity=aml.fpkms.prob.hg38$ethnicity,
+  time=aml.fpkms.prob.hg38$surv.data$time,
+  status=aml.fpkms.prob.hg38$surv.data$status)
+
+surv_mat$strata <- "mid"
+surv_mat[surv_mat$samples %in% as.character(df[df$grouping==3,]$patient), ]$strata <- "ihi"
+surv_mat[surv_mat$samples %in% as.character(df[df$grouping==1,]$patient), ]$strata <- "ilo"
+
+p <- ggsurvplot(
+  survfit(Surv(time, status) ~ strata, data = surv_mat),
+  data = surv_mat,
+  risk.table = TRUE,
+  pval = TRUE,
+  break.time.by = 500,
+  ggtheme = theme_minimal(),
+  risk.table.y.text.col = TRUE,
+  risk.table.y.text = FALSE)
+
+fn <- sprintf(paste(dir.figures, "kaplan_maier_risk_score.pdf", sep=""))
+pdf(fn, height=6, width=6)
+print(p)
+dev.off()
+
+```
+
+Go enrichment of pathways ?
+```{r}
 ```
 
 Example.
