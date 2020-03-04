@@ -408,6 +408,7 @@ row.names(aml_tcga$mrna.tpm) <- aml_tcga$genes
 
 Preprocess TARGET data.
 ```{r}
+
 # Convert FPKM to TPM
 mrna.tpm <- apply(aml.fpkms.prob.hg38$mRNA, 2, function(x) fpkmToTpm(x))
 aml.fpkms.prob.hg38$mrna.tpm <- mrna.tpm
@@ -1061,7 +1062,7 @@ wilcox.test(comp[aml_cell_lines], comp[non_aml_cl] , alternative='less')
 
 ```
 
-Independet validation.
+Independent validation.
 ```{r}
 #TCGA genes
 cox_res <- read.csv(file=paste(dir.save, "cox_tcga_tpm_results_with_description.csv", sep="/"))
