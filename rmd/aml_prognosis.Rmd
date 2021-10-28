@@ -161,7 +161,9 @@ cox.gene.expression.target <- function(gene, surv_mat=surv_mat){
   cox_uncntrl <- coxph(Surv(time, status) ~ gene, data=surv_mat)
   summary_uncntrl  <- summary(cox_uncntrl)
     
-  cox_cntrl <- coxph(Surv(time, status) ~ gene + age + strata(sex, race, ethnicity, tissue), data=surv_mat)
+  #cox_cntrl <- coxph(Surv(time, status) ~ gene + age + strata(sex, race, ethnicity, tissue), data=surv_mat)
+  #summary_cntrl  <- summary(cox_cntrl)
+  cox_cntrl <- coxph(Surv(time, status) ~ gene + age + strata(sex, race), data=surv_mat)
   summary_cntrl  <- summary(cox_cntrl)
     
   res <- c(summary_uncntrl$coefficients["gene", 1:5], summary_cntrl$coefficients["gene", 1:5])
@@ -201,8 +203,8 @@ rm(prob)
 # load TARGET data
 load(paste(dir.aml, "aml.fpkms.n145.hg38.prob.Rdata", sep="")) # prob_name=aml.fpkms.prob.hg38
 # read in data from BEAT study
-#rna.beat.cpm <- read.csv(paste(dir.beat, "Gene_counts_CPM.csv", sep=""), header=TRUE, sep=",", stringsAsFactors = FALSE)
-rna.beat.rpkm <- read.csv(paste(dir.beat, "Gene_counts_RPKM.csv", sep=""), header=TRUE, sep=",", stringsAsFactors = FALSE)
+rna.beat.cpm <- read.csv(paste(dir.beat, "Gene_counts_CPM.csv", sep=""), header=TRUE, sep=",", stringsAsFactors = FALSE)
+#rna.beat.rpkm <- read.csv(paste(dir.beat, "Gene_counts_RPKM.csv", sep=""), header=TRUE, sep=",", stringsAsFactors = FALSE)
 rna.beat.clinical <- read.csv(paste(dir.beat, "Clinical_Summary.csv", sep=""), header=TRUE, sep=",", stringsAsFactors = FALSE)
 # load BEAT AML - TPM normalized
 load(file=paste(dir.beat, "prob_aml_beat.RData", sep=""))
@@ -245,16 +247,21 @@ rna.beat.clinical.sel1 <- rna.beat.clinical[rna.beat.clinical$LabId_match_with_r
 rna.beat.clinical.sel1 <- rna.beat.clinical[rna.beat.clinical$LabId_match_with_rpkm_matrix %in% colnames(rna.beat.rpkm), ]
 
 # select cases with the following specimenGroup
-sel.specimenGroups <- c("Initial Acute Leukemia Diagnosis", 
-                       "Post-Chemotherapy", "Post-Chemotherapy|Relapse",
-                       "Post-Chemotherapy|Residual Disease", "Residual Disease",
-                       "Residual Disease|Post-Chemotherapy")
+#sel.specimenGroups <- c("Initial Acute Leukemia Diagnosis", 
+#                       "Post-Chemotherapy", "Post-Chemotherapy|Relapse",
+#                       "Post-Chemotherapy|Residual Disease", "Residual Disease",
+#                       "Residual Disease|Post-Chemotherapy")
 # remove 'Post-Chemotherapy'
-afterPCAsel <- c("Initial Acute Leukemia Diagnosis", "Post-Chemotherapy|Relapse",
-                 "Post-Chemotherapy|Residual Disease", "Residual Disease",
-                 "Residual Disease|Post-Chemotherapy")
+#afterPCAsel <- c("Initial Acute Leukemia Diagnosis", "Post-Chemotherapy|Relapse",
+#                 "Post-Chemotherapy|Residual Disease", "Residual Disease",
+#                 "Residual Disease|Post-Chemotherapy")
+
 # select samples 
-rna.beat.clinical.sel2 <- rna.beat.clinical.sel1[rna.beat.clinical.sel1$specimenGroups %in% afterPCAsel, ]
+# After consulting with Ani & Karina, we decided to only include samples at initial diagnosis
+rna.beat.clinical.sel2 <- rna.beat.clinical.sel1[rna.beat.clinical.sel1$specimenGroups 
+                                                 %in% "Initial Acute Leukemia Diagnosis" & 
+                                                   rna.beat.clinical.sel1$dxAtInclusion %in%
+                                                   "ACUTE MYELOID LEUKAEMIA (AML) AND RELATED PRECURSOR NEOPLASMS", ]
 
 # select samples from rna matrix
 rna.tpm.sel <- rna.tpm[, rna.beat.clinical.sel2$LabId_match_with_rpkm_matrix]
@@ -299,6 +306,69 @@ aml_beat <- list(
 
 # save Robject
 save(file=paste(dir.beat, "prob_aml_beat.RData", sep=""), aml_beat)
+
+```
+
+Merge datasets and plot PCA.
+```{r}
+# select LAML only
+ix <- which(prob0$types=="LAML")
+aml_tcga <- subset.prob.tcga(prob0, ix)
+
+# free up some memory
+rm(prob0)
+
+# Convert FPKM to TPM
+mrna.tpm <- apply(aml_tcga$mRNA, 2, function(x) fpkmToTpm(x))
+aml_tcga$mrna.tpm <- mrna.tpm
+
+# assign column and rownames to mRNA
+colnames(aml_tcga$mrna.tpm) <- aml_tcga$samples
+row.names(aml_tcga$mrna.tpm) <- aml_tcga$genes
+
+# TARGET
+# Convert FPKM to TPM
+mrna.tpm <- apply(aml.fpkms.prob.hg38$mRNA, 2, function(x) fpkmToTpm(x))
+aml.fpkms.prob.hg38$mrna.tpm <- mrna.tpm
+row.names(aml.fpkms.prob.hg38$mrna.tpm) <- aml.fpkms.prob.hg38$genes
+
+# BEAT
+aml_beat$mrna.tpm
+
+# Merge TCGA and TARGET
+ix <- intersect(row.names(aml_tcga$mrna.tpm), 
+                row.names(aml.fpkms.prob.hg38$mrna.tpm))
+# Intersect list with BEAT
+iy <- intersect(ix, row.names(aml_beat$mrna.tpm))
+
+# sort 
+tcga <- aml_tcga$mrna.tpm[iy, ]
+target <- aml.fpkms.prob.hg38$mrna.tpm[iy, ]
+beat <- aml_beat$mrna.tpm[iy, ]
+
+aml_cohort <- cbind(tcga, target, beat)
+
+# Load function from below
+pcas <- mat2pca(aml_cohort)
+pcas1_4 <- as.data.frame(pcas[, 1:4])
+pcas1_4$cohort <- c(rep("TCGA", dim(tcga)[2]), 
+                    rep("TARGET", dim(target)[2]),
+                    rep("BEAT", dim(beat)[2]))
+
+pcas1_4$LabId_match_with_rpkm_matrix <- row.names(pcas1_4)
+
+m.pcas <- merge(pcas1_4, 
+                rna.beat.clinical, 
+                by="LabId_match_with_rpkm_matrix",
+                all.x = TRUE)
+m.pcas$X..Blasts.in.BM <- as.numeric(m.pcas$X..Blasts.in.BM)
+
+g <- ggplot(data=m.pcas, 
+            aes(x=PC1, y=PC2, pch=cohort, colour=X..Blasts.in.BM))
+g <- g + geom_point(size=2, alpha=0.7)
+#g <- g + scale_color_gradient(low="blue", high="red")
+g <- g + theme_bw()
+plot(g)
 
 ```
 
@@ -465,7 +535,7 @@ aml_beat_intermediate <- subset.genes.prob.beat(aml_beat, ix)
 ix <- which(rowMedians(as.matrix(aml_beat_intermediate$mrna.tpm)) > 1)
 aml_beat_filtered <- subset.genes.prob.beat(aml_beat_intermediate, ix)
 
-# only select genes with an FPKM greater than 0 fplm=log2(1=0)
+# only select genes with an FPKM greater than 0 fpkm=log2(1=0)
 ix <- which(rowMedians(as.matrix(aml_beat_intermediate$mrna.rpkm)) > 0)
 aml_beat_filtered <- subset.genes.prob.beat(aml_beat_intermediate, ix)
 ```
@@ -618,13 +688,13 @@ write.csv(cox_mrna_m, file=paste(dir.save, "cox_TARGET_tpm_results_with_descript
 # plotting
 p <- ggplot(data=cox_mrna_m, aes(x=log2(cntrl_HR), y=-log10(cntrl_P)))
 p <- p + geom_point(fill="blue", colour="white", pch=21, alpha=0.5, size=2.5)
-p <- p + geom_point(data=cox_mrna_me[cox_mrna_m$cntrl_padjust < 0.05, ], 
+p <- p + geom_point(data=cox_mrna_m[cox_mrna_m$cntrl_padjust < 0.1, ], 
                     aes(x=log2(cntrl_HR), y=-log10(cntrl_P)),
                     fill="red", colour="white", pch=21, alpha=0.5, size=2.5)
-p <- p + geom_text_repel(data=cox_mrna_m[cox_mrna_m$cntrl_padjust < 0.05 & log2(cox_mrna_m$cntrl_HR) > 0 , ], 
+p <- p + geom_text_repel(data=cox_mrna_m[cox_mrna_m$cntrl_padjust < 0.1 & log2(cox_mrna_m$cntrl_HR) > 0 , ], 
                          aes(x=log2(cntrl_HR), y=-log10(cntrl_P), label=hgnc_symbol), 
                          color="red")
-p <- p + geom_text_repel(data=cox_mrna_m[cox_mrna_m$cntrl_padjust < 0.05 & log2(cox_mrna_m$cntrl_HR) < 0 , ], 
+p <- p + geom_text_repel(data=cox_mrna_m[cox_mrna_m$cntrl_padjust < 0.1 & log2(cox_mrna_m$cntrl_HR) < 0 , ], 
                          aes(x=log2(cntrl_HR), y=-log10(cntrl_P), label=hgnc_symbol), 
                          color="blue")
 p <- p + coord_fixed(ratio = 1)
@@ -678,8 +748,8 @@ cox_mrna$hgnc_symbol <- row.names(cox_mrna)
 
 # save results
 # write table
-write.csv(cox_mrna, file=paste(dir.save, "cox_beat_tpm_results.csv", sep="/"), row.names=TRUE)
-write.csv(cox_mrna, file=paste(dir.save, "cox_beat_rpkm_results.csv", sep="/"), row.names=TRUE)
+write.csv(cox_mrna, file=paste(dir.save, "cox_beat_ixdiag_tpm_results.csv", sep="/"), row.names=TRUE)
+write.csv(cox_mrna, file=paste(dir.save, "cox_beat_ixdiag_rpkm_results.csv", sep="/"), row.names=TRUE)
 
 
 # Plot Hazard ratio vs P value
