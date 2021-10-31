@@ -1,0 +1,620 @@
+---
+title: "Seletive depencies for AML cell lines in CCLE/depmap"
+author: Fiorella Schischlik
+date: October, 29th, 2021
+output:
+  md_document:
+    variant: gfm
+---
+
+Load libraries.
+```{r}
+library(ggplot2)
+library(ggrepel)
+library(ComplexHeatmap)
+library(ggpubr)
+library(poolr)
+library(reshape2)
+library(data.table)
+```
+
+Set directories.
+```{r}
+# dir_depmap <- "~/OneDrive - National Institutes of Health/DepMap/"
+dir_depmap <- "~/datasets/depmap/"
+dir_out <- "~/src/aml-2019/results/HOX_dependency/"
+dir_resouces <-"~/src/aml-2019/resources/"
+# on biowulf
+#dir_depmap <- "/data/Lab_ruppin/projects/sl-nf1-cdkn2a/processed_data/"
+#dir_out <- "/data/Lab_ruppin/schischlikf2/aml-2019/"
+```
+
+Load data.
+```{r}
+
+# load depmap data
+depmap <- readRDS(paste(dir_depmap, "depmap_21Q3_screen_data.rds", sep=""))
+
+```
+
+Visualize HOX genes.
+```{r}
+
+# Ani Deshpande annotation
+aml_manual_annotation <- readxl::read_excel(paste0(dir_resouces, "DepMap_AML_Cell_Lines_Hox_KMT2A_Status_etc.xlsx"))
+
+# Annotate which cell lines have expression and crispr data
+dp_cls <- colnames(depmap$mrna)
+crispr_cls <- dp_cls[colSums(depmap$gene_fitness_crispr_depmap_21q3, na.rm=TRUE) != 0]
+rnai_cls <- dp_cls[colSums(depmap$gene_fitness_rnai_depmap, na.rm=TRUE) != 0]
+
+# which one's do overlap with the aml cell lines ?
+aml_manual_annotation$have_crispr <- aml_manual_annotation$DepMap_ID %in% crispr_cls
+aml_manual_annotation$have_rnai <- aml_manual_annotation$DepMap_ID %in% rnai_cls
+
+# Resources: https://www.haematologica.org/article/view/9926
+# As for the HOX question, we can divide leukemia (not just AML, but leukemia 
+# – AML and ALL, so we have more) cell lines into HOX positive and HOX negative 
+# to do the same figure as above. Here we can do a statistic between HOX 
+# positive compared to HOX negative. To define HOX positive and negative,  The 
+# list of HOX genes activated in AML cell lines are mostly of the HOXA cluster 
+# (HOXA5, HOXA7, HOXA9, HOXA10, HOXA11) or the HOXB cluster (HOXB3, HOXB4, 
+# HOXB5, HOXB6, HOXB7). So the HOX positive cell lines would be either HOXA 
+# OR HOXB positive (both clubbed into the HOX positive group). Any cell line 
+# that has neither HOXA nor HOXB expressed would be the HOX negative group.
+
+HOXA <- c("HOXA1", "HOXA2", "HOXA3", "HOXA4", 
+          "HOXA5", "HOXA6", "HOXA7", "HOXA9", 
+          "HOXA10", "HOXA11", "HOXA13")
+HOXB <- c("HOXB1", "HOXB2", "HOXB3", "HOXB4", 
+          "HOXB5", "HOXB6", "HOXB7", "HOXB8",
+          "HOXB9", "HOXB13")
+
+HOX <- c(HOXA, HOXB, "MEIS1")
+
+# AML
+# check HOX gene distribution in aml_cell_lines, witout NA's
+aml_cell_lines <- rownames(depmap$meta_data[grep("AML", depmap$meta_data$subtype),])
+hox_expr <- depmap$mrna[HOX, aml_cell_lines]
+colnames(hox_expr) <- depmap$meta_data[aml_cell_lines, ]$cell_line
+hox_expr_naomit <- t(na.omit(t(hox_expr)))
+
+# subselect aml manual annotation
+aml_manual_annotation_sub <- aml_manual_annotation[aml_manual_annotation$stripped_cell_line_name %in% colnames(hox_expr_naomit), ]
+
+aml_manual_annotation_sub[is.na(aml_manual_annotation_sub$Hox_High_Known), ]$Hox_High_Known <- "No"
+aml_manual_annotation_sub$stripped_cell_line_name <- factor(
+  aml_manual_annotation_sub$stripped_cell_line_name, levels=colnames(hox_expr_naomit))
+aml_manual_annotation_sub <- aml_manual_annotation_sub[order(aml_manual_annotation_sub$stripped_cell_line_name), ]
+
+# Add annotation
+ha <- HeatmapAnnotation(
+  HOX_positive = aml_manual_annotation_sub$Hox_High_Known,
+  have_crispr = aml_manual_annotation_sub$have_crispr,
+  have_rnai = aml_manual_annotation_sub$have_rnai,
+  gp = gpar(col = "white"))
+
+# Plot 
+Heatmap(
+  t(scale(t(hox_expr_naomit))), 
+  top_annotation = ha,
+  heatmap_legend_param = list(title = "Expression \n z-score"),
+  cluster_rows = FALSE)
+
+# ALL --------------------------------------------------------------------------
+# check HOX gene distribution in aml_cell_lines, without NA's
+all_cell_lines <- rownames(depmap$meta_data[grep("ALL", depmap$meta_data$subtype),])
+hox_expr_all <- depmap$mrna[HOX, all_cell_lines]
+colnames(hox_expr_all) <- depmap$meta_data[all_cell_lines, ]$cell_line
+hox_expr_all_naomit <- t(na.omit(t(hox_expr_all)))
+
+# Plot 
+Heatmap(
+  t(scale(t(hox_expr_all_naomit))), 
+  heatmap_legend_param = list(title = "Expression \n z-score"),
+  cluster_rows=FALSE)
+
+# Plot AML and ALL together ----------------------------------------------------
+# Plot PCA and kmeans
+# Scale expression
+hox <- cbind(hox_expr_all_naomit, hox_expr_naomit)
+
+t(scale(t(hox)))
+pca_on_hox <- prcomp(hox)
+# 4 clusters
+fit <- kmeans(pca_on_hox$rotation, 4)
+
+# Annotation
+ha <- HeatmapAnnotation(
+  cell_line = c(rep("ALL", dim(hox_expr_all_naomit)[2]), rep("AML", dim(hox_expr_naomit)[2])),
+  gp = gpar(col = "white"))
+
+Heatmap(
+  t(scale(t(hox))), 
+  heatmap_legend_param = list(title = "Expression \n z-score"),
+  top_annotation = ha, 
+  cluster_rows = FALSE)
+
+# create plot dataframe
+to_plot <- as.data.frame(pca_on_hox$rotation[, c("PC1", "PC2")])
+to_plot$cell_line <- c(rep("ALL", dim(hox_expr_all_naomit)[2]), 
+                       rep("AML", dim(hox_expr_naomit)[2]))
+to_plot$cluster <- fit$cluster
+to_plot$cell_line <- row.names(to_plot)
+
+p <- ggplot(data=to_plot, aes(x=PC1, y=PC2, fill=as.factor(cluster), label=cell_line, colour=as.factor(cluster)))
+p <- p + geom_point(pch=21, alpha=0.8)
+p <- p + geom_text_repel()
+plot(p)
+
+```
+
+Identify HOX low and HOX high cell lines in AML.
+```{r}
+
+# Try adding up scores
+scaled_matrix <- t(scale(t(hox_expr_naomit)))
+median_score <- median(colSums((scaled_matrix > 0) * 1))
+lower_t <- quantile(colSums((scaled_matrix > 0) * 1), c(0:3/3))[2]
+
+# Try adding up sum of expression
+hoxa_expr_score <- colSums(hox_expr_naomit[HOXA, ])
+hoxa_score <- hoxa_expr_score < quantile(hoxa_expr_score, probs = 0.25)
+hoxb_expr_score <- colSums(hox_expr_naomit[HOXB, ])
+hoxb_score <- hoxb_expr_score < quantile(hoxb_expr_score, probs = 0.25)
+
+ha <- HeatmapAnnotation(
+  HOX_positive = aml_manual_annotation_sub$Hox_High_Known,
+  hoxa_expr_score = hoxa_expr_score,
+  hoxa_score = hoxa_score,
+  hoxb_expr_score = hoxb_expr_score,
+  hoxb_score = hoxb_score,
+  hox_zscore = as.factor((colSums((scaled_matrix > 0) * 1) > lower_t) * 1),
+  have_crispr = aml_manual_annotation_sub$have_crispr,
+  have_rnai = aml_manual_annotation_sub$have_rnai,
+  gp = gpar(col = "white"))
+
+Heatmap(
+  t(scale(t(hox_expr_naomit))), 
+  heatmap_legend_param = list(title = "Expression \n z-score"),
+  top_annotation = ha, 
+  cluster_rows = FALSE)
+
+```
+
+Identify HOX low and HOX high cell lines in ALL
+```{r}
+
+scaled_matrix <- t(scale(t(hox_expr_all_naomit)))
+median_score <- median(colSums((scaled_matrix > 0) * 1))
+lower_t <- quantile(colSums((scaled_matrix > 0) * 1), c(0:3/3))[2]
+
+ha <- HeatmapAnnotation(
+  hox = as.factor((colSums((scaled_matrix > 0) * 1) > lower_t) * 1),
+  gp = gpar(col = "white"))
+
+Heatmap(
+  t(scale(t(hox_expr_all_naomit))), 
+  heatmap_legend_param = list(title = "Expression \n z-score"),
+  top_annotation = ha, 
+  cluster_rows = FALSE)
+
+```
+
+Essentiality function.
+```{r}
+
+essentiality <- function(
+  screen=screen_data,
+  sl_pair=sl_pair,
+  data_slots=c("mrna", "scna"),
+  gene_fitness_slots=c("crispr_depmap_21q3", "rnai_depmap"),
+  q2=FALSE){
+  
+  # results columns
+  results <- c()
+  #results_column <- c("SL_A_B_", "SDL_A_B_", "SL_B_A_", "SR_B_A_")
+  #results_column <- as.character(sapply(data_slots, function(x) paste(results_column, x, sep="")))
+  #results_column <- append(c('GENE_A', 'GENE_B'), results_column)
+  #names(results) <- results_column
+  
+  # Just in case make sure the sl_pair does not contain NA values
+  if(sum(is.na(sl_pair)) == 0){
+    
+      if (q2){
+        
+        # q2 slots
+        q2_slots <- paste0(data_slots, "_q2")
+        
+      for (score in gene_fitness_slots){
+        
+        for (slot in q2_slots){
+          
+          results[paste("GENE_A_", score, "_fit_score#cl")] <- sum((!is.na(screen[[paste0("gene_fitness_",score)]][sl_pair["GENE_A"], ])) * 1)
+        results[paste("GENE_B_", score, "_fit_score#cl")] <- sum((!is.na(screen[[paste0("gene_fitness_",score)]][sl_pair["GENE_B"], ])) * 1)
+  
+          molecdata_q2 <- screen[[slot]][sl_pair["GENE_A"],]
+          
+          #print(molecdata_q2)
+          
+          results[paste("SL_A_B", slot, score, sep="_")] <- wilcox.test.na(
+            screen[[paste0("gene_fitness_",score)]][sl_pair["GENE_B"], molecdata_q2 == 0],
+            screen[[paste0("gene_fitness_",score)]][sl_pair["GENE_B"], molecdata_q2 > 0],
+            alternative1 = "less")
+          
+          results[paste("SDL_A_B", slot, score, sep="_")] <- wilcox.test.na(
+            screen[[paste0("gene_fitness_",score)]][sl_pair["GENE_B"], molecdata_q2 < 2],
+            screen[[paste0("gene_fitness_",score)]][sl_pair["GENE_B"], molecdata_q2 == 2],
+            alternative1 = "greater")
+          
+          # Change direction B -> A
+          molecdata_q2 <- screen[[slot]][sl_pair["GENE_B"],]
+          
+          results[paste("SL_B_A", slot, score, sep="_")] <- wilcox.test.na(
+            screen[[paste0("gene_fitness_",score)]][sl_pair["GENE_A"], molecdata_q2 == 0],
+            screen[[paste0("gene_fitness_",score)]][sl_pair["GENE_A"], molecdata_q2 > 0],
+            alternative1 = "less")
+          
+          results[paste("SR_B_A_", slot, score, sep="_")] <- wilcox.test.na(
+            screen[[paste0("gene_fitness_",score)]][sl_pair["GENE_A"], molecdata_q2 < 2],
+            screen[[paste0("gene_fitness_",score)]][sl_pair["GENE_A"], molecdata_q2 == 2],
+            alternative1 = "greater")
+          }
+        }
+      }
+  }
+    return(results)
+}
+
+
+
+wilcox.test.na = function(x,y, alternative1, paired=FALSE) {
+  
+  tryCatch(
+    wilcox.test(x, y, alternative=alternative1, paired=paired)$p.value,
+    error = function(e) NA)
+  
+}
+
+```
+
+Run essentiality. 
+```{r}
+
+run_essentiality <- function(
+  screen=depmap,
+  data){
+  
+  # Define HOX_status
+  HOX_status <- (hoxa_expr_score < quantile(hoxa_expr_score, probs = 0.25)) * 1
+  # HOX_status <- (colSums((scaled_matrix > 0) * 1) > lower_t) * 1
+  
+  # Get expression
+  expression <- depmap$mrna
+  colnames(expression) <- depmap$meta_data$cell_line
+  cell_lines_symbol <- colnames(data)
+  cls_matrix <- expression[, cell_lines_symbol]
+  cls_matrix <- rbind(HOX_status=c(HOX_status * 2), cls_matrix)
+
+  # crispr
+  essentiality_dep <- depmap$gene_fitness_crispr_depmap_21q3
+  colnames(essentiality_dep) <- depmap$meta_data$cell_line
+  matrix_ess <- essentiality_dep[, cell_lines_symbol]
+  matrix_ess <- rbind(HOX_status=c(HOX_status * 2), matrix_ess)
+
+  # rnai
+  rnai <- depmap$gene_fitness_rnai_depmap
+  colnames(rnai) <- depmap$meta_data$cell_line
+  matrix_rnai <- rnai[, cell_lines_symbol]
+  matrix_rnai <- rbind(HOX_status=c(HOX_status * 2), matrix_rnai)
+
+  screen <- list(
+    mrna_q2=cls_matrix,
+    gene_fitness_crispr_depmap_21q3=matrix_ess,
+    gene_fitness_rnai_depmap=matrix_rnai
+  )
+
+  gene_a <- "HOX_status"
+  gene_names <- row.names(screen$mrna)
+  
+  essentiality_multiple <- as.data.frame(t(
+    as.data.frame(
+      sapply(gene_names, function(x) essentiality(
+        screen=screen,
+        sl_pair=c(GENE_A = gene_a, GENE_B = x),
+        data_slots=c("mrna"),
+        gene_fitness_slots=c("crispr_depmap_21q3", "rnai_depmap"),
+        q2=TRUE)))))
+  
+  return(essentiality_multiple)
+}
+
+aml_essentiality <- run_essentiality(
+  screen=depmap,
+  data=hox_expr_naomit)
+
+all_essentiality <- run_essentiality(
+  screen=depmap,
+  data=hox_expr_all_naomit)
+
+```
+
+Run correlation.
+```{r}
+
+
+quick_cor <- function(gene_corr, x, y){
+    
+    gene_cor <- as.data.frame(t(screen_to_plot$gene_fitness_crispr_depmap_21q3[c(x, y),]))
+    gene_cor_na_omit <- na.omit(gene_cor)
+    gene_cor_na_omit$gene_name <- row.names(gene_cor_na_omit)
+    
+    #print(gene_cor_na_omit)
+    
+    if(dim(gene_cor_na_omit)[1] == 0){
+      pearson_test <- as.list(c(p.value=NA, estimate=NA))
+    }else{
+      pearson_test <- cor.test(
+      gene_cor_na_omit[[x]], 
+      gene_cor_na_omit[[y]], 
+      method="pearson", 
+      alternative="less")
+    }
+    
+    return(c(pearson_test$p.value, pearson_test$estimate))
+}
+
+run_correlation <- function(
+  screen=depmap,
+  data,
+  HOX_status=hoxa_expr_scores){
+  
+  # Get expression
+  expression <- depmap$mrna
+  colnames(expression) <- depmap$meta_data$cell_line
+  cell_lines_symbol <- colnames(data)
+  cls_matrix <- expression[, cell_lines_symbol]
+  cls_matrix <- rbind(HOX_status=HOX_status, cls_matrix)
+
+  # crispr
+  essentiality_dep <- depmap$gene_fitness_crispr_depmap_21q3
+  colnames(essentiality_dep) <- depmap$meta_data$cell_line
+  matrix_ess <- essentiality_dep[, cell_lines_symbol]
+  matrix_ess <- rbind(HOX_status=HOX_status, matrix_ess)
+
+  # rnai
+  rnai <- depmap$gene_fitness_rnai_depmap
+  colnames(rnai) <- depmap$meta_data$cell_line
+  matrix_rnai <- rnai[, cell_lines_symbol]
+  matrix_rnai <- rbind(HOX_status=HOX_status, matrix_rnai)
+
+  screen <- list(
+    mrna_q2=cls_matrix,
+    gene_fitness_crispr_depmap_21q3=matrix_ess,
+    gene_fitness_rnai_depmap=matrix_rnai
+  )
+
+  gene_a <- "HOX_status"
+  gene_names <- row.names(screen$mrna)
+  
+  cor_multiple <- sapply(gene_names, function(x) quick_cor(
+    screen,
+    x=gene_a,
+    y=x))
+  
+  return(cor_multiple)
+}
+
+aml_corr <- run_correlation(
+  screen=depmap,
+  data=hox_expr_naomit,
+  HOX_status = hoxa_expr_score)
+
+aml_corr <- data.frame(t(aml_corr))
+colnames(aml_corr) <- c("pvalue", "cor")
+
+aml_corr$FDR <- p.adjust(aml_corr$pvalue, method="fdr")
+aml_corr <- aml_corr[order(aml_corr$pvalue),]
+
+write.csv(aml_corr,
+          file = paste(dir_out, "HOX_dependency_aml_specific_pearson.tsv"))
+```
+
+Add FDR.
+```{r}
+
+essentiality_multiple <- data.frame(aml_essentiality)
+essentiality_multiple$SDL_BH_crispr <- p.adjust(essentiality_multiple$SDL_A_B_mrna_q2_crispr_depmap_21q3, method="fdr")
+essentiality_multiple$SDL_BH_rnai <- p.adjust(essentiality_multiple$SDL_A_B_mrna_q2_rnai_depmap, method="fdr")
+essentiality_multiple <- essentiality_multiple[order(essentiality_multiple$SDL_A_B_mrna_q2_crispr_depmap_21q3), ]
+
+sdl <- data.frame(na.omit(essentiality_multiple[c(
+  "SDL_A_B_mrna_q2_crispr_depmap_21q3", "SDL_BH_crispr",
+  "SDL_A_B_mrna_q2_rnai_depmap", "SDL_BH_rnai")]))
+
+# sdl$fisher <- apply(
+#   sdl, 
+#   1, 
+#   function(x) { (poolr::fisher(x, adjust = "none"))$p})
+# 
+# sdl$BH <- p.adjust(sdl$fisher, method="BH")
+
+```
+
+Add drug targets.
+```{r}
+
+sdl$gene_name <- row.names(sdl)
+drugs <- read.csv("~/OneDrive - National Institutes of Health/Druggability/Druggability.tsv", header=TRUE, sep="\t")
+
+annotate.drugs.drugbank <- function(gene_name, drug.list=drugs){
+  #print(gene_name)
+  #print(gene_name)
+  #print(head(drug.list))
+  drug_gene <- drug.list[drug.list$gene_name==as.character(gene_name),]
+  if(!(is.data.frame(drug_gene) && nrow(drug_gene)==0)){
+    matched.drugs <- paste(unique(drug_gene$drug_name), collapse=",")
+  }
+  else{
+    matched.drugs <- ""
+  }
+  #print(matched.drugs)
+  return(matched.drugs)
+}
+
+sdl$drugbank <- sapply(sdl$gene_name, FUN=function(x) annotate.drugs.drugbank(x, drug.list=drugs))
+
+write.csv(sdl, file=paste(dir_out, "HOX_dependency_ALL.tsv"))
+
+# only subselect genes with drug targets
+sdl_sub <-sdl[sdl$drugbank!="", ]
+sdl_sub$BH_sub <- p.adjust(sdl_sub$SDL_A_B_mrna_q2_crispr_depmap_21q3, method="BH")
+
+```
+
+Prepare data for plotting.
+```{r}
+
+get_data_in_format <- function(
+  depmap, 
+  data,
+  HOX_status){
+  
+  # Expression
+  expression <- depmap$mrna
+  colnames(expression) <- depmap$meta_data$cell_line
+  cell_lines_symbol <- colnames(data)
+  cls_matrix <- expression[, cell_lines_symbol]
+  cls_matrix <- rbind(HOX_status=HOX_status, cls_matrix)
+  
+  # crispr
+  essentiality_dep <- depmap$gene_fitness_crispr_depmap_21q3
+  colnames(essentiality_dep) <- depmap$meta_data$cell_line
+  matrix_ess <- essentiality_dep[, cell_lines_symbol]
+  matrix_ess <- rbind(HOX_status=HOX_status, matrix_ess)
+
+  # rnai
+  rnai <- depmap$gene_fitness_rnai_depmap
+  colnames(rnai) <- depmap$meta_data$cell_line
+  matrix_rnai <- rnai[, cell_lines_symbol]
+  matrix_rnai <- rbind(HOX_status=HOX_status, matrix_rnai)
+
+
+  screen <- list(
+    mrna_q2=cls_matrix,
+    gene_fitness_crispr_depmap_21q3=matrix_ess,
+    gene_fitness_rnai_depmap=matrix_rnai)
+
+  gene_a <- "HOX_status"
+  gene_names <- row.names(screen$mrna)
+  
+  return(screen)
+}
+
+```
+
+Visualize correlation.
+```{r}
+
+HOX_status <- (hoxa_expr_score < quantile(hoxa_expr_score, probs = 0.25)) * 1
+
+screen_to_plot <- get_data_in_format(
+  depmap, 
+  data=hox_expr_naomit, 
+  HOX_status = hoxa_expr_score)
+
+genes_to_plot <- c("HOX_status", row.names(aml_corr)[32:48])
+genes_to_plot <- c("HOX_status", "DOT1L", "MEN1", "KMT2A")
+
+gene_corr <- as.data.frame(t(screen_to_plot$gene_fitness_crispr_depmap_21q3[genes_to_plot,]))
+gene_corr$cell_lines <- row.names(gene_corr)
+
+to_plot <- data.table::melt(gene_corr, id.vars=c("HOX_status", "cell_lines"))
+colnames(to_plot) <- c("HOX_aggr_expr", "cell_lines", "gene_name", "dependency_score")
+#cor.test(gene_corr$HOX_status, gene_corr$MRPS23, method="pearson", alternative="less")
+
+g <- ggplot(data=to_plot, aes(x=HOX_aggr_expr, y=dependency_score, label=cell_lines))
+g <- g + geom_point()
+#g <- g + ylim(c(-1, 0.5))
+g <- g + stat_smooth(method = "lm", col = "red")
+g <- g + geom_text_repel()
+g <- g + facet_wrap(~gene_name, scales="free_y")
+plot(g)
+
+fn <-
+  sprintf(
+    paste(
+      dir_out,
+      "depmap_crispr_HOX_dependency_crispr_top_pearson.pdf",
+      sep = ""
+    )
+  )
+pdf(fn, height = 10, width = 11)
+print(g)
+dev.off()
+
+
+```
+
+Visualize the gene essentiality data. (Boxplots)
+```{r}
+
+# Select genes to plot
+#gof <- row.names(head(essentiality_multiple, 10))
+sdl <- sdl[order(sdl$SDL_A_B_mrna_q2_crispr_depmap_21q3), ]
+gof <- c("KMT2A", "DOT1L", "MEN1")
+#gof <- row.names(head(sdl, 10))
+
+expression <- screen_to_plot$mrna_q2["HOX_status", ]
+gene_fitness_score <- screen_to_plot$gene_fitness_crispr_depmap_21q3[gof, ]
+#gene_fitness_score <- screen$gene_fitness_rnai_depmap[gof, ]
+
+# Reshape data
+gfs_melted <- reshape2::melt(t(gene_fitness_score))
+colnames(gfs_melted) <- c("cell_line", "gene_name", "gene_fitness_score")
+gfs_melted$strata <- rep(expression, length(unique(gfs_melted$gene_name)))
+gfs_melted$strata_name <- "HOX pos"
+gfs_melted[gfs_melted$strata==0, ]$strata_name <- "HOX neg"
+
+#gene_ess_plot <- data.frame(
+#  expression = expression,
+#  gene_fitness_score=gene_fitness_score,
+#  strata=expression)
+
+my_comparisons <- list(c("HOX pos", "HOX neg"))
+
+p <- ggboxplot(gfs_melted, x = "strata_name", y = "gene_fitness_score",
+               color = "strata_name", palette =c("#00AFBB", "#E7B800"),
+               add = "jitter", shape = "strata_name")
+p <- p + ylim(c(-1.5, 0.8))
+p <- p + stat_compare_means(
+  comparisons = my_comparisons, 
+  method = "wilcox.test",
+  paired = FALSE)
+p <- p + facet_wrap(~gene_name)
+plot(p)
+
+# Select single gene
+expression <- screen$mrna_q2["HOX_status", ]
+gene_fitness_score <- screen$gene_fitness_crispr_depmap_21q3["SYNE3", ]
+#gene_fitness_score <- screen$gene_fitness_rnai_depmap["POLE2", ]
+
+gene_ess_plot <- data.frame(
+  expression = expression,
+  gene_fitness_score=gene_fitness_score,
+  strata=expression)
+
+my_comparisons <- list( c("0", "2") )
+
+p <- ggboxplot(gene_ess_plot, x = "strata", y = "gene_fitness_score",
+               color = "strata", palette =c("#00AFBB", "#E7B800"),
+               add = "jitter", shape = "strata")
+p <- p + stat_compare_means(
+  comparisons = my_comparisons, 
+  method = "wilcox.test",
+  paired = FALSE)
+plot(p)
+
+
+```
+
