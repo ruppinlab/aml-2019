@@ -1,5 +1,5 @@
 ---
-title: "Seletive depencies for AML cell lines in CCLE/depmap"
+title: "HOX depencies for AML cell lines in CCLE/depmap"
 author: Fiorella Schischlik
 date: October, 29th, 2021
 output:
