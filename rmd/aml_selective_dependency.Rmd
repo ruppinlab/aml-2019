@@ -153,7 +153,7 @@ aml_manual_add_anno <- aml_manual_annotation[
 
 write.table(
   aml_manual_add_anno, 
-  "depmap_aml_annotation.tsv",
+  "depmap_aml_celllines_annotation.tsv",
   quote=FALSE,
   row.names=FALSE,
   sep = "\t")
@@ -206,8 +206,7 @@ colnames(wilcox_rnai) <-
     "mean_ess_score_cls_others_rnai",
     "abs_diff_score_rnai",
     "wilcox_pval_rnai",
-    "FDR_rnai"
-  )
+    "FDR_rnai")
 
 ```
 
